@@ -50,6 +50,7 @@
 #include <wx/event.h>
 #include <wx/evtloop.h>
 #include <wx/timer.h>
+#include <wx/fswatcher.h>
 #include <wx/wrapsizer.h>
 #ifdef _WIN32
 #include <wx/richtooltip.h>
@@ -6797,6 +6798,14 @@ struct Plater::priv
 
     wxTimer                     background_process_timer;
     wxTimer                     auto_reslice_timer;
+    wxTimer                     source_reload_timer;
+    wxFileSystemWatcher*        source_file_watcher{ nullptr };
+    std::set<std::string>       watched_source_files;
+    std::map<std::string, std::time_t> watched_source_file_mtimes;
+
+    void update_source_file_watches();
+    void on_source_file_changed(wxFileSystemWatcherEvent& evt);
+    bool source_files_changed_on_disk();
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -7441,6 +7450,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
 
     this->background_process_timer.SetOwner(this->q, 0);
     this->auto_reslice_timer.SetOwner(this->q, 0);
+    this->source_reload_timer.SetOwner(this->q, 0);
     this->q->Bind(wxEVT_TIMER, [this](wxTimerEvent &evt)
     {
         if (&evt.GetTimer() == &this->background_process_timer) {
@@ -7449,6 +7459,12 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         } else if (&evt.GetTimer() == &this->auto_reslice_timer) {
             this->auto_reslice_timer.Stop();
             this->trigger_auto_reslice_now();
+        } else if (&evt.GetTimer() == &this->source_reload_timer) {
+            this->source_reload_timer.Stop();
+            if (this->source_files_changed_on_disk()) {
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": source file(s) changed on disk, reloading";
+                this->q->reload_all_from_disk();
+            }
         } else {
             evt.Skip();
         }
@@ -7904,6 +7920,10 @@ Plater::priv::~priv()
 {
     if (config != nullptr)
         delete config;
+    if (source_file_watcher != nullptr) {
+        source_file_watcher->RemoveAll();
+        delete source_file_watcher;
+    }
     // Saves the database of visited (already shown) hints into hints.ini.
     notification_manager->deactivate_loaded_hints();
     main_frame->m_tabpanel->Unbind(wxEVT_NOTEBOOK_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
@@ -9909,6 +9929,108 @@ void Plater::priv::object_list_changed()
     wxGetApp().params_panel()->notify_object_config_changed();
 
     q->mark_plate_toolbar_image_dirty();
+
+    update_source_file_watches();
+}
+
+namespace {
+    // Sentinel for "file does not currently exist" so a create is detected as a change too.
+    constexpr std::time_t source_file_missing_mtime = 0;
+
+    std::time_t get_source_file_mtime(const std::string& path)
+    {
+        boost::system::error_code ec;
+        std::time_t mtime = boost::filesystem::last_write_time(path, ec);
+        return ec ? source_file_missing_mtime : mtime;
+    }
+}
+
+// Keeps the file-system watcher in sync with the distinct set of ModelVolume::source.input_file
+// paths currently referenced by the model, so a running instance can reload objects automatically
+// when their source file changes on disk. Watches each source file's parent directory rather than
+// the file itself: export tools commonly write to a temp file and rename it into place, and an
+// inode-based watch on the file itself can silently stop tracking it across such a replace.
+//
+// Only verified on macOS so far, where the kqueue-based backend can report such a rename with
+// just the containing directory and no filename at all (see on_source_file_changed() and
+// source_files_changed_on_disk() below for how that's handled). wxWidgets uses ReadDirectoryChangesW
+// on Windows and inotify on Linux, both of which report renames more precisely, so this should work
+// there too, but it hasn't been built or tested on either platform.
+//
+// The bigger cross-platform risk either way is a network-mounted source directory: this was only
+// exercised against a share mounted at /Volumes/... on macOS, and it worked only because *some*
+// directory-level event still arrived to wake the check. inotify is well known not to fire
+// reliably over NFS mounts, and SMB shares on Windows can have similar gaps with
+// ReadDirectoryChangesW; if the network filesystem delivers no event at all, nothing wakes the
+// check and the reload silently never happens, regardless of OS. The --reload / --reload-and-slice
+// CLI triggers are unaffected by this and remain a reliable fallback for such setups.
+void Plater::priv::update_source_file_watches()
+{
+    if (!wxGetApp().app_config->get_bool("auto_reload_on_source_change")) {
+        if (source_file_watcher != nullptr && !watched_source_files.empty()) {
+            source_file_watcher->RemoveAll();
+            watched_source_files.clear();
+            watched_source_file_mtimes.clear();
+        }
+        return;
+    }
+
+    std::set<std::string> current_files;
+    for (const ModelObject* object : model.objects)
+        for (const ModelVolume* volume : object->volumes)
+            if (!volume->source.input_file.empty())
+                current_files.insert(volume->source.input_file);
+
+    if (current_files == watched_source_files)
+        return;
+
+    if (source_file_watcher == nullptr) {
+        source_file_watcher = new wxFileSystemWatcher();
+        source_file_watcher->SetOwner(q);
+        q->Bind(wxEVT_FSWATCHER, [this](wxFileSystemWatcherEvent& evt) { this->on_source_file_changed(evt); });
+    }
+
+    source_file_watcher->RemoveAll();
+    watched_source_files = std::move(current_files);
+
+    // Record a baseline mtime for each tracked file so the debounced check can tell whether it
+    // actually changed, rather than relying on the watcher event to name the file: directory-level
+    // backends (e.g. macOS's kqueue-based one) can report a rename-into-place with just the
+    // containing directory and no filename at all, which a path-matching approach would miss.
+    std::map<std::string, std::time_t> new_mtimes;
+    std::set<std::string> watched_dirs;
+    for (const std::string& file : watched_source_files) {
+        new_mtimes[file] = get_source_file_mtime(file);
+        watched_dirs.insert(fs::path(file).parent_path().string());
+    }
+    watched_source_file_mtimes = std::move(new_mtimes);
+
+    for (const std::string& dir : watched_dirs) {
+        if (!dir.empty() && fs::is_directory(dir))
+            source_file_watcher->Add(wxFileName(dir, wxEmptyString));
+    }
+}
+
+void Plater::priv::on_source_file_changed(wxFileSystemWatcherEvent&)
+{
+    // Any event in a watched directory just wakes the debounced check below; see the comment in
+    // update_source_file_watches() for why we don't try to match the event's reported path.
+    source_reload_timer.Start(500, wxTIMER_ONE_SHOT);
+}
+
+// Called once the debounce timer fires. Returns true (and updates the stored baseline) if any
+// tracked source file's mtime actually changed since we last checked.
+bool Plater::priv::source_files_changed_on_disk()
+{
+    bool changed = false;
+    for (auto& [file, mtime] : watched_source_file_mtimes) {
+        std::time_t current = get_source_file_mtime(file);
+        if (current != mtime) {
+            mtime = current;
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 void Plater::priv::select_curr_plate_all()

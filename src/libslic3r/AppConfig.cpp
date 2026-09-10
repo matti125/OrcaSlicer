@@ -125,6 +125,9 @@ void AppConfig::set_defaults()
         if (get("auto_slice_change_delay_seconds").empty())
             set("auto_slice_change_delay_seconds", "1");
 
+        if (get("auto_reload_on_source_change").empty())
+            set_bool("auto_reload_on_source_change", false);
+
         if (get("drop_project_action").empty())
             set_bool("drop_project_action", true);
 
