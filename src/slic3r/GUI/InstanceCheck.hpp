@@ -98,7 +98,10 @@ private:
 
 #if __APPLE__
 	//implemented at InstanceCheckMac.mm
-	void    register_for_messages(const std::string &version_hash);
+	// channel_id, if non-empty, is an additional notification name (from InstanceRegistry) to
+	// listen on so this specific instance can be addressed by --target-instance/--target-file,
+	// alongside the existing version_hash channel shared by every instance of this executable.
+	void    register_for_messages(const std::string &version_hash, const std::string &channel_id = std::string());
 	void    unregister_for_messages();
 	// Opaque pointer to RemovableDriveManagerMM
 	void* m_impl_osx;

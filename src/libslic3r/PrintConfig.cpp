@@ -12292,6 +12292,19 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->tooltip = L("Sent to a running single-instance GUI: reload all objects from disk, slice the current plate, show Preview.");
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("target_instance", coString);
+    def->label = L("Target instance");
+    def->tooltip = L("Address a specific running OrcaSlicer instance by its pid or instance id instead of whichever instance owns this executable's single-instance lock. See also --target-file.");
+    def->cli_params = "pid-or-instance-id";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("target_file", coString);
+    def->label = L("Target instance by loaded file");
+    def->tooltip = L("Address whichever running OrcaSlicer instance currently has this file loaded, instead of whichever instance owns this executable's single-instance lock. Requires that instance to have "
+                     "\"Allow targeting this instance by its loaded file name\" enabled in Preferences.");
+    def->cli_params = "path/to/file";
+    def->set_default_value(new ConfigOptionString());
+
     def = this->add("datadir", coString);
     def->label = L("Data directory");
     def->tooltip = L("Load and store settings at the given directory. This is useful for maintaining different profiles or including configurations from a network storage.");

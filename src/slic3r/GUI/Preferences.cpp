@@ -1051,9 +1051,11 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
             if (m_sync_user_preset_checkbox) m_sync_user_preset_checkbox->Enable(!enabled);
             if (m_bambu_cloud_checkbox)      m_bambu_cloud_checkbox->Enable(!enabled);
         }
-        else if (param == "auto_reload_on_source_change") {
-            // Apply immediately: start/stop watching the currently loaded objects' source
-            // files rather than waiting for the next unrelated object-list change.
+        else if (param == "auto_reload_on_source_change" || param == "expose_loaded_files_for_targeting") {
+            // Apply immediately: (re)publish the currently loaded objects' source files (or, if
+            // just turned off, stop publishing/watching them) rather than waiting for the next
+            // unrelated object-list change. Both preferences are refreshed from the same
+            // Plater::priv::object_list_changed() call.
             if (Plater* plater = wxGetApp().plater())
                 plater->object_list_changed();
         }
@@ -1815,7 +1817,14 @@ void PreferencesDialog::create_items()
            "since this is a background action you didn't just explicitly ask for."),
         "auto_slice_after_reload");
     g_sizer->Add(item_auto_slice_after_reload);
- 
+
+    auto item_expose_loaded_files = create_item_checkbox(
+        _L("Allow targeting this instance by its loaded file name"),
+        _L("If enabled, this instance publishes the file paths it currently has loaded so an external --target-file trigger can address it directly when several instances are running. "
+           "Off by default: this writes those paths to a local, owner-only-readable status file, which some users won't want for confidentiality reasons regardless of file permissions."),
+        "expose_loaded_files_for_targeting");
+    g_sizer->Add(item_expose_loaded_files);
+
     //// CONTROL > Camera
     g_sizer->Add(create_item_title(_L("Camera")), 1, wxEXPAND);
 

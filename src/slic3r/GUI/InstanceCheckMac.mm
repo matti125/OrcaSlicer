@@ -70,12 +70,16 @@ void send_message_mac_closing(const std::string &msg, const std::string &version
 }
 
 namespace GUI {
-void OtherInstanceMessageHandler::register_for_messages(const std::string &version_hash)
+void OtherInstanceMessageHandler::register_for_messages(const std::string &version_hash, const std::string &channel_id)
 {
 	m_impl_osx = [[OtherInstanceMessageHandlerMac alloc] init];
 	if(m_impl_osx) {
 		NSString *nsver = [NSString stringWithCString:version_hash.c_str() encoding:[NSString defaultCStringEncoding]];
 		[(id)m_impl_osx add_observer:nsver];
+		if (!channel_id.empty()) {
+			NSString *nschan = [NSString stringWithCString:channel_id.c_str() encoding:[NSString defaultCStringEncoding]];
+			[(id)m_impl_osx add_observer:nschan];
+		}
 	}
 }
 

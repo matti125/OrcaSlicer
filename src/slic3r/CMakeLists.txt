@@ -294,6 +294,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/IMToolbar.hpp
     GUI/InstanceCheck.cpp
     GUI/InstanceCheck.hpp
+    GUI/InstanceRegistry.cpp
+    GUI/InstanceRegistry.hpp
     GUI/Jobs/ArrangeJob.cpp
     GUI/Jobs/ArrangeJob.hpp
     GUI/Jobs/BindJob.cpp

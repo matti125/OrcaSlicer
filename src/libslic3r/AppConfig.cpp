@@ -131,6 +131,9 @@ void AppConfig::set_defaults()
         if (get("auto_slice_after_reload").empty())
             set_bool("auto_slice_after_reload", false);
 
+        if (get("expose_loaded_files_for_targeting").empty())
+            set_bool("expose_loaded_files_for_targeting", false);
+
         if (get("drop_project_action").empty())
             set_bool("drop_project_action", true);
 

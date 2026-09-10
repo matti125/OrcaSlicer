@@ -133,6 +133,7 @@
 #include "../Utils/Process.hpp"
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
+#include "InstanceRegistry.hpp"
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
 #include "MsgDialog.hpp"
@@ -6816,12 +6817,13 @@ struct Plater::priv
     std::set<std::string>       watched_source_files;
     std::map<std::string, std::time_t> watched_source_file_mtimes;
 
-    void update_source_file_watches();
+    void update_source_file_watches(const std::set<std::string>& current_files);
     void on_source_file_changed(wxFileSystemWatcherEvent& evt);
     bool source_files_changed_on_disk();
     void maybe_auto_slice_after_reload();
     void request_reload_and_slice(bool switch_to_preview);
     std::string resolve_source_file_path(const std::string& recorded_path) const;
+    std::set<std::string> collect_resolved_source_files() const;
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -7483,7 +7485,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
                 // A rename-into-place leaves any file-level watch bound to the old inode, and the
                 // set of paths is unchanged so the regular refresh would skip re-arming it.
                 this->watched_source_files.clear();
-                this->update_source_file_watches();
+                this->update_source_file_watches(this->collect_resolved_source_files());
                 this->maybe_auto_slice_after_reload();
             }
         } else {
@@ -9941,7 +9943,12 @@ void Plater::priv::object_list_changed()
 
     q->mark_plate_toolbar_image_dirty();
 
-    update_source_file_watches();
+    std::set<std::string> current_source_files = collect_resolved_source_files();
+
+    update_source_file_watches(current_source_files);
+    // Independent of the watcher/auto-reload preference above: lets --target-file address this
+    // instance, gated on its own opt-in preference (see InstanceRegistry.hpp for why).
+    InstanceRegistry::update_loaded_files(std::vector<std::string>(current_source_files.begin(), current_source_files.end()));
 }
 
 namespace {
@@ -9973,6 +9980,21 @@ std::string Plater::priv::resolve_source_file_path(const std::string& recorded_p
     return recorded_path;
 }
 
+// Shared by object_list_changed() and set_project_filename(): both need to recompute the
+// distinct, resolved set of source files currently referenced by the model -- the former on any
+// object-list change, the latter specifically because m_project_folder (which
+// resolve_source_file_path()'s fallback depends on) isn't set yet the first time
+// object_list_changed() runs during project load, so it has to be redone once it is.
+std::set<std::string> Plater::priv::collect_resolved_source_files() const
+{
+    std::set<std::string> current_files;
+    for (const ModelObject* object : model.objects)
+        for (const ModelVolume* volume : object->volumes)
+            if (!volume->source.input_file.empty())
+                current_files.insert(resolve_source_file_path(volume->source.input_file));
+    return current_files;
+}
+
 // Keeps the file-system watcher in sync with the distinct set of source files currently
 // referenced by the model. Each file's parent directory is watched (a rename-into-place, the
 // common export pattern, only shows up as a directory-listing change) and, where the backend
@@ -9982,7 +10004,7 @@ std::string Plater::priv::resolve_source_file_path(const std::string& recorded_p
 // against the baseline recorded here. If a directory never delivers events (seen once with a
 // very large, busy directory), nothing wakes the check and the reload silently never happens;
 // the --reload CLI triggers remain a fallback.
-void Plater::priv::update_source_file_watches()
+void Plater::priv::update_source_file_watches(const std::set<std::string>& current_files)
 {
     if (!wxGetApp().app_config->get_bool("auto_reload_on_source_change")) {
         if (source_file_watcher != nullptr && !watched_source_files.empty()) {
@@ -9992,12 +10014,6 @@ void Plater::priv::update_source_file_watches()
         }
         return;
     }
-
-    std::set<std::string> current_files;
-    for (const ModelObject* object : model.objects)
-        for (const ModelVolume* volume : object->volumes)
-            if (!volume->source.input_file.empty())
-                current_files.insert(resolve_source_file_path(volume->source.input_file));
 
     if (current_files == watched_source_files)
         return;
@@ -10009,7 +10025,7 @@ void Plater::priv::update_source_file_watches()
     }
 
     source_file_watcher->RemoveAll();
-    watched_source_files = std::move(current_files);
+    watched_source_files = current_files;
 
     // Record a baseline mtime for each tracked file so the debounced check can tell whether it
     // actually changed, rather than relying on the watcher event to name the file: directory-level
@@ -13634,13 +13650,16 @@ void Plater::priv::set_project_filename(const wxString& filename)
     if (!m_project_folder.empty() && !q->m_only_gcode)
         wxGetApp().mainframe->add_to_recent_projects(filename);
 
-    // Re-resolve and re-arm the source-file watches now that m_project_folder is current:
-    // resolve_source_file_path()'s project-folder fallback (for a volume whose recorded source
-    // degraded to a bare filename, e.g. a 3MF saved without "Store full source file paths") needs
-    // this to already be set, but object_list_changed() -- the usual place that recomputes the
-    // watch set -- fires before set_project_filename() during project load, not after, so its
-    // attempt at resolution sees an empty project folder and silently fails to find anything.
-    update_source_file_watches();
+    // Re-resolve and re-arm the source-file watches (and refresh the registry's loaded_files)
+    // now that m_project_folder is current: resolve_source_file_path()'s project-folder fallback
+    // (for a volume whose recorded source degraded to a bare filename, e.g. a 3MF saved without
+    // "Store full source file paths") needs this to already be set, but object_list_changed() --
+    // the usual place both of these are recomputed -- fires before set_project_filename() during
+    // project load, not after, so its attempt at resolution sees an empty project folder and
+    // silently fails to find anything.
+    std::set<std::string> current_source_files = collect_resolved_source_files();
+    update_source_file_watches(current_source_files);
+    InstanceRegistry::update_loaded_files(std::vector<std::string>(current_source_files.begin(), current_source_files.end()));
 }
 
 void Plater::priv::init_notification_manager()

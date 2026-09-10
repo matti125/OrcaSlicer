@@ -1,5 +1,6 @@
 #include "GUI_App.hpp"
 #include "InstanceCheck.hpp"
+#include "InstanceRegistry.hpp"
 #include "Plater.hpp"
 #include <boost/regex.hpp>
 
@@ -57,8 +58,10 @@ namespace instance_check_internal
 
 	struct CommandLineAnalysis
 	{
-		std::optional<bool>	should_send;
-		std::string    		cl_string;
+		std::optional<bool>	     should_send;
+		std::string    		     cl_string;
+		std::optional<std::string> target_instance;
+		std::optional<std::string> target_file;
 	};
 	static CommandLineAnalysis process_command_line(int argc, char** argv)
 	{
@@ -73,9 +76,15 @@ namespace instance_check_internal
 				ret.should_send = true;
 			else if (token == "--no-single-instance")
 				ret.should_send = false;
+			// --target-instance/--target-file pick which running instance to relay to; they're
+			// consumed here rather than forwarded, since they're meaningless to the receiver.
+			else if (token == "--target-instance" && i + 1 < argc)
+				ret.target_instance = argv[++i];
+			else if (token == "--target-file" && i + 1 < argc)
+				ret.target_file = argv[++i];
 			else
 				arguments.emplace_back(token);
-		} 
+		}
 		ret.cl_string = escape_strings_cstyle(arguments);
 		BOOST_LOG_TRIVIAL(debug) << "single instance: " << 
             (ret.should_send.has_value() ? (*ret.should_send ? "true" : "false") : "undefined") <<
@@ -335,6 +344,24 @@ bool instance_check(int argc, char** argv, bool app_config_single_instance)
 	GUI::wxGetApp().set_instance_hash(hashed_path);
 	BOOST_LOG_TRIVIAL(debug) <<"full path: "<< lock_name;
 	instance_check_internal::CommandLineAnalysis cla = instance_check_internal::process_command_line(argc, argv);
+
+	if (cla.target_instance.has_value() || cla.target_file.has_value()) {
+		// Addressing a specific instance is independent of whether *this* executable path has
+		// another instance of itself running, so resolve and relay directly rather than falling
+		// into the single-instance-lock flow below (which only ever knows about "the" instance
+		// sharing this exe path's hash).
+		std::optional<std::string> channel = cla.target_instance.has_value()
+			? GUI::InstanceRegistry::resolve_by_instance_id(*cla.target_instance)
+			: GUI::InstanceRegistry::resolve_by_loaded_file(*cla.target_file);
+		if (! channel.has_value()) {
+			BOOST_LOG_TRIVIAL(error) << "Instance check: no running instance matches --target-instance/--target-file, nothing sent.";
+			std::cerr << "orcaslicer: no matching running instance found for --target-instance/--target-file" << std::endl;
+			return true;
+		}
+		instance_check_internal::send_message(cla.cl_string, *channel);
+		return true;
+	}
+
 	if (! cla.should_send.has_value())
 		cla.should_send = app_config_single_instance;
 #ifdef _WIN32
@@ -379,7 +406,8 @@ void OtherInstanceMessageHandler::init(wxEvtHandler* callback_evt_handler)
 	m_callback_evt_handler = callback_evt_handler;
 
 #if defined(__APPLE__)
-	this->register_for_messages(wxGetApp().get_instance_hash_string());
+	std::string channel_id = InstanceRegistry::register_instance();
+	this->register_for_messages(wxGetApp().get_instance_hash_string(), channel_id);
 #endif //__APPLE__
 
 #ifdef BACKGROUND_MESSAGE_LISTENER
@@ -402,6 +430,7 @@ void OtherInstanceMessageHandler::shutdown(MainFrame* main_frame)
 #if __APPLE__
 		//delete macos implementation
 		this->unregister_for_messages();
+		InstanceRegistry::unregister_instance();
 #endif //__APPLE__
 #ifdef BACKGROUND_MESSAGE_LISTENER
 		if (m_thread.joinable()) {
