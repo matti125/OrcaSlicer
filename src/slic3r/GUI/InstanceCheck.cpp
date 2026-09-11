@@ -346,6 +346,7 @@ bool instance_check(int argc, char** argv, bool app_config_single_instance)
 	instance_check_internal::CommandLineAnalysis cla = instance_check_internal::process_command_line(argc, argv);
 
 	if (cla.target_instance.has_value() || cla.target_file.has_value()) {
+#if defined(__APPLE__)
 		// Addressing a specific instance is independent of whether *this* executable path has
 		// another instance of itself running, so resolve and relay directly rather than falling
 		// into the single-instance-lock flow below (which only ever knows about "the" instance
@@ -359,6 +360,11 @@ bool instance_check(int argc, char** argv, bool app_config_single_instance)
 			return true;
 		}
 		instance_check_internal::send_message(cla.cl_string, *channel);
+#else
+		// Only the macOS notification-center transport can address a per-instance channel; the
+		// Windows and Linux transports are keyed on the executable's hash alone.
+		std::cerr << "orcaslicer: --target-instance/--target-file are only supported on macOS" << std::endl;
+#endif
 		return true;
 	}
 
@@ -568,8 +574,8 @@ void OtherInstanceMessageHandler::handle_message(const std::string& message)
 	// Opening a file or a download link always brings the window forward, same as any other
 	// app's "open a document" UX; reload/reload-and-slice only do it when --activate was given,
 	// so a workflow that keeps both the CAD tool and OrcaSlicer visible isn't interrupted by
-	// every reload. This mirrors the (pre-existing) EVT_INSTANCE_GO_TO_FRONT post on the Linux
-	// DBus path below.
+	// every reload. This is the only place that decides it: the per-platform receivers just
+	// forward the message here.
 	if (had_paths || had_downloads || ((reload_only || reload_and_slice) && activate))
 	{
 		wxPostEvent(m_callback_evt_handler, InstanceGoToFrontEvent(EVT_INSTANCE_GO_TO_FRONT));
@@ -618,7 +624,6 @@ namespace MessageHandlerDBusInternal
 	{
 	    DBusError     err;
 	    char*         text = nullptr;
-		wxEvtHandler* evt_handler;
 
 	    dbus_error_init(&err);
 	    dbus_message_get_args(request, &err, DBUS_TYPE_STRING, &text, DBUS_TYPE_INVALID);
@@ -628,11 +633,6 @@ namespace MessageHandlerDBusInternal
 	        return;
 	    }
 	    wxGetApp().other_instance_message_handler()->handle_message(text);
-
-		evt_handler = wxGetApp().plater();
-		if (evt_handler) {
-			wxPostEvent(evt_handler, InstanceGoToFrontEvent(EVT_INSTANCE_GO_TO_FRONT));
-		}
 	}
 	//every dbus message received comes here
 	static DBusHandlerResult handle_dbus_object_message(DBusConnection *connection, DBusMessage *message, void *user_data)

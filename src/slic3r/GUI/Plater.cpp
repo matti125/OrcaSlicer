@@ -7485,7 +7485,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
                 // A rename-into-place leaves any file-level watch bound to the old inode, and the
                 // set of paths is unchanged so the regular refresh would skip re-arming it.
                 this->watched_source_files.clear();
-                this->update_source_file_watches(this->collect_resolved_source_files());
+                this->refresh_source_file_tracking();
                 this->maybe_auto_slice_after_reload();
             }
         } else {

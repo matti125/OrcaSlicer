@@ -12300,14 +12300,14 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 
     def = this->add("target_instance", coString);
     def->label = L("Target instance");
-    def->tooltip = L("Address a specific running OrcaSlicer instance by its pid or instance id instead of whichever instance owns this executable's single-instance lock. See also --target-file.");
+    def->tooltip = L("Address a specific running OrcaSlicer instance by its pid or instance id instead of whichever instance owns this executable's single-instance lock. See also --target-file. macOS only.");
     def->cli_params = "pid-or-instance-id";
     def->set_default_value(new ConfigOptionString());
 
     def = this->add("target_file", coString);
     def->label = L("Target instance by loaded file");
     def->tooltip = L("Address whichever running OrcaSlicer instance currently has this file loaded, instead of whichever instance owns this executable's single-instance lock. Requires that instance to have "
-                     "\"Allow targeting this instance by its loaded file name\" enabled in Preferences.");
+                     "\"Allow targeting this instance by its loaded file name\" enabled in Preferences. macOS only.");
     def->cli_params = "path/to/file";
     def->set_default_value(new ConfigOptionString());
 

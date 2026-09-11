@@ -35,7 +35,7 @@ namespace {
         // Signal 0 sends nothing but still performs the existence/permission check; since every
         // instance we ever register belongs to the current user, EPERM shouldn't happen here in
         // practice, but treat anything other than "no such process" as "still alive" to be safe.
-        return kill(static_cast<pid_t>(pid), 0) == 0 || errno != ESRCH;
+        return pid > 0 && (kill(static_cast<pid_t>(pid), 0) == 0 || errno != ESRCH);
     }
 
     fs::path registry_dir() { return fs::path(data_dir()) / "cache" / "instances"; }
@@ -54,8 +54,17 @@ namespace {
         j["pid"] = current_pid();
         j["exe_path"] = fs::system_complete(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).string();
         j["channel_id"] = s_channel_id;
-        if (wxGetApp().app_config->get_bool("expose_loaded_files_for_targeting") && !loaded_files.empty())
-            j["loaded_files"] = loaded_files;
+        if (wxGetApp().app_config->get_bool("expose_loaded_files_for_targeting") && !loaded_files.empty()) {
+            // Canonical so a --target-file lookup (which canonicalises its argument) matches
+            // regardless of symlinks in either path, e.g. /tmp vs. /private/tmp on macOS.
+            std::vector<std::string> canonical_files;
+            for (const std::string& file : loaded_files) {
+                boost::system::error_code ec;
+                const fs::path canonical = fs::canonical(file, ec);
+                canonical_files.push_back(ec ? file : canonical.string());
+            }
+            j["loaded_files"] = canonical_files;
+        }
 
         boost::system::error_code ec;
         fs::create_directories(registry_dir(), ec);
@@ -93,7 +102,8 @@ namespace {
         } catch (const std::exception&) {
             return std::nullopt;
         }
-        if (!j.contains("pid") || !j.contains("channel_id"))
+        if (!j.contains("pid") || !j["pid"].is_number_integer() ||
+            !j.contains("channel_id") || !j["channel_id"].is_string())
             return std::nullopt;
         if (!pid_is_alive(j["pid"].get<long>())) {
             boost::system::error_code ec;
@@ -114,8 +124,12 @@ namespace {
             if (entry.path().extension() != ".json")
                 continue;
             std::optional<json> j = read_live_entry(entry.path());
-            if (j.has_value() && matches(*j))
-                return j->at("channel_id").get<std::string>();
+            try {
+                if (j.has_value() && matches(*j))
+                    return j->at("channel_id").get<std::string>();
+            } catch (const std::exception&) {
+                // A field with an unexpected type in one entry shouldn't abort the whole lookup.
+            }
         }
         return std::nullopt;
     }
