@@ -12284,12 +12284,18 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 
     def = this->add("reload", coBool);
     def->label = L("Reload from disk");
-    def->tooltip = L("Sent to a running single-instance GUI: reload all objects from disk, without slicing.");
+    def->tooltip = L("Sent to a running single-instance GUI: reload all objects from disk, without slicing. Does not bring the window to front unless --activate is also given.");
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("reload_and_slice", coBool);
     def->label = L("Reload and slice");
-    def->tooltip = L("Sent to a running single-instance GUI: reload all objects from disk, slice the current plate, show Preview.");
+    def->tooltip = L("Sent to a running single-instance GUI: reload all objects from disk, slice the current plate, show Preview. Does not bring the window to front unless --activate is also given.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("activate", coBool);
+    def->label = L("Activate window");
+    def->tooltip = L("Combine with --reload/--reload-and-slice to also bring the OrcaSlicer window to front. Off by default so reloading doesn't steal focus from another application; has no effect on opening "
+                     "a file or a download link, which always bring the window to front.");
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("target_instance", coString);

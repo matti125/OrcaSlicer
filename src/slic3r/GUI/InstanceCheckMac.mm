@@ -21,8 +21,11 @@
 
 -(void)message_update:(NSNotification *)msg
 {
-	[self bring_forward];
-	//pass message  
+	// Whether to bring_forward depends on what the message actually contains (e.g.
+	// reload/reload-and-slice only do it when --activate is given, unlike opening a file or a
+	// download link, which always does) -- that decision now lives in handle_message(), which
+	// posts EVT_INSTANCE_GO_TO_FRONT itself when warranted, same as the Linux DBus path already
+	// does.
 	Slic3r::GUI::wxGetApp().other_instance_message_handler()->handle_message(std::string([msg.userInfo[@"data"] UTF8String]));
 }
 

@@ -7908,14 +7908,10 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     });
     this->q->Bind(EVT_RELOAD_OTHER_INSTANCE, [this](SimpleEvent&) {
         BOOST_LOG_TRIVIAL(trace) << "Received reload from other instance event.";
-        wxGetApp().mainframe->Show();
-        wxGetApp().mainframe->Raise();
         this->q->reload_all_from_disk();
     });
     this->q->Bind(EVT_RELOAD_AND_SLICE_OTHER_INSTANCE, [this](SimpleEvent&) {
         BOOST_LOG_TRIVIAL(trace) << "Received reload-and-slice from other instance event.";
-        wxGetApp().mainframe->Show();
-        wxGetApp().mainframe->Raise();
         this->q->reload_all_from_disk();
         this->request_reload_and_slice(true);
     });
