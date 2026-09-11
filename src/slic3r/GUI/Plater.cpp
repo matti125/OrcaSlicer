@@ -10055,6 +10055,20 @@ void Plater::priv::update_source_file_watches()
         if (!dir.empty() && fs::is_directory(dir))
             source_file_watcher->Add(wxFileName(dir, wxEmptyString));
     }
+
+    // Also watch each file directly, in addition to its containing directory: a directory-level
+    // watch only fires when the directory's own listing changes (an entry added, removed, or
+    // renamed), not when an existing file is overwritten in place with the same name -- macOS's
+    // kqueue backend confirmed via testing to produce no event at all for a plain `cp` or `touch`
+    // onto an existing file, only for a real rename-into-place. Watching the file's own vnode
+    // catches that in-place-write case; the directory watch above remains what catches a
+    // rename-based replace (the scenario it was originally added for), since a file-level watch
+    // can lose track of the file across exactly that kind of swap once the underlying inode
+    // changes -- the two watches cover each other's blind spot.
+    for (const std::string& file : watched_source_files) {
+        if (fs::exists(file))
+            source_file_watcher->Add(wxFileName(file));
+    }
 }
 
 void Plater::priv::on_source_file_changed(wxFileSystemWatcherEvent&)
