@@ -6823,7 +6823,7 @@ struct Plater::priv
     void maybe_auto_slice_after_reload();
     void request_reload_and_slice(bool switch_to_preview);
     std::string resolve_source_file_path(const std::string& recorded_path) const;
-    std::set<std::string> collect_resolved_source_files() const;
+    void refresh_source_file_tracking();
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -9939,12 +9939,7 @@ void Plater::priv::object_list_changed()
 
     q->mark_plate_toolbar_image_dirty();
 
-    std::set<std::string> current_source_files = collect_resolved_source_files();
-
-    update_source_file_watches(current_source_files);
-    // Independent of the watcher/auto-reload preference above: lets --target-file address this
-    // instance, gated on its own opt-in preference (see InstanceRegistry.hpp for why).
-    InstanceRegistry::update_loaded_files(std::vector<std::string>(current_source_files.begin(), current_source_files.end()));
+    refresh_source_file_tracking();
 }
 
 namespace {
@@ -9976,19 +9971,23 @@ std::string Plater::priv::resolve_source_file_path(const std::string& recorded_p
     return recorded_path;
 }
 
-// Shared by object_list_changed() and set_project_filename(): both need to recompute the
-// distinct, resolved set of source files currently referenced by the model -- the former on any
-// object-list change, the latter specifically because m_project_folder (which
-// resolve_source_file_path()'s fallback depends on) isn't set yet the first time
-// object_list_changed() runs during project load, so it has to be redone once it is.
-std::set<std::string> Plater::priv::collect_resolved_source_files() const
+// Recomputes the distinct, resolved set of source files currently referenced by the model and
+// pushes it to both consumers. Called from object_list_changed() on any object-list change, and
+// again from set_project_filename() because m_project_folder (which resolve_source_file_path()'s
+// fallback depends on) isn't set yet the first time object_list_changed() runs during project
+// load, so the resolution has to be redone once it is.
+void Plater::priv::refresh_source_file_tracking()
 {
     std::set<std::string> current_files;
     for (const ModelObject* object : model.objects)
         for (const ModelVolume* volume : object->volumes)
             if (!volume->source.input_file.empty())
                 current_files.insert(resolve_source_file_path(volume->source.input_file));
-    return current_files;
+
+    update_source_file_watches(current_files);
+    // Independent of the watcher/auto-reload preference: lets --target-file address this
+    // instance, gated on its own opt-in preference (see InstanceRegistry.hpp for why).
+    InstanceRegistry::update_loaded_files(std::vector<std::string>(current_files.begin(), current_files.end()));
 }
 
 // Keeps the file-system watcher in sync with the distinct set of source files currently
@@ -13646,16 +13645,9 @@ void Plater::priv::set_project_filename(const wxString& filename)
     if (!m_project_folder.empty() && !q->m_only_gcode)
         wxGetApp().mainframe->add_to_recent_projects(filename);
 
-    // Re-resolve and re-arm the source-file watches (and refresh the registry's loaded_files)
-    // now that m_project_folder is current: resolve_source_file_path()'s project-folder fallback
-    // (for a volume whose recorded source degraded to a bare filename, e.g. a 3MF saved without
-    // "Store full source file paths") needs this to already be set, but object_list_changed() --
-    // the usual place both of these are recomputed -- fires before set_project_filename() during
-    // project load, not after, so its attempt at resolution sees an empty project folder and
-    // silently fails to find anything.
-    std::set<std::string> current_source_files = collect_resolved_source_files();
-    update_source_file_watches(current_source_files);
-    InstanceRegistry::update_loaded_files(std::vector<std::string>(current_source_files.begin(), current_source_files.end()));
+    // Now that m_project_folder is current; see refresh_source_file_tracking() for why the
+    // earlier call from object_list_changed() isn't enough during project load.
+    refresh_source_file_tracking();
 }
 
 void Plater::priv::init_notification_manager()
