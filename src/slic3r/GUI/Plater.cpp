@@ -9974,20 +9974,23 @@ namespace {
 // on Windows and inotify on Linux, both of which report renames more precisely, so this should work
 // there too, but it hasn't been built or tested on either platform.
 //
-// Network-mounted vs. local source directories were both exercised on macOS, with a surprising
-// result: an SMB share mounted at /Volumes/... reliably delivered events end to end (watch armed,
-// event received, reload, and -- via maybe_auto_slice_after_reload() -- reslice all completing),
-// while a source file on the local APFS "Data" volume (under /Users/...) produced *no* watcher
-// event at all for either a plain touch or a real write-temp-then-rename, despite the watch itself
-// reporting successfully armed on that directory. That's the opposite of the usual expectation
-// that network filesystems are the less reliable case for change notifications (e.g. inotify is
-// well known not to fire reliably over NFS on Linux), and the root cause on the local-volume side
-// wasn't pinned down (a macOS privacy/TCC permission gap for the unsigned dev build is one
-// plausible explanation, but unconfirmed). Bottom line: reliability here depends on the specific
-// volume/OS combination in ways that haven't been fully mapped out, on any platform. If the
-// network filesystem or local volume in a given setup delivers no event at all, nothing wakes the
-// check and the reload silently never happens. The --reload / --reload-and-slice CLI triggers are
-// unaffected by this and remain a reliable fallback regardless of which case a given setup hits.
+// Network-mounted and local source directories were both exercised on macOS and both work: an
+// SMB share mounted at /Volumes/... and a small, dedicated local APFS directory (under /Users/...)
+// each reliably delivered events end to end (watch armed, event received, reload, and -- via
+// maybe_auto_slice_after_reload() -- reslice all completing). An earlier version of this comment
+// reported the local case as failing outright and speculated about a macOS TCC/permission gap;
+// that test happened to point the watch at this repo's own resources/profiles/ directory, which
+// has hundreds of files in it, and produced no events at all there even though the watch reported
+// itself successfully armed. Retesting against a small, purpose-made local directory worked
+// immediately with no permission changes in between, so the real variable was that directory's
+// size/business, not local-vs-network or any permission gap -- though the exact mechanism (kqueue
+// itself struggling with a large directory, contention with another watcher on the same tree such
+// as git's or Xcode's, or something else) wasn't pinned down either. Net effect for a normal
+// project folder (a CAD file plus maybe a few sliced outputs, not hundreds of entries): this
+// should work reliably regardless of local vs. network placement. If a given setup's directory
+// ever doesn't deliver events, nothing wakes the check and the reload silently never happens; the
+// --reload / --reload-and-slice CLI triggers are unaffected by this and remain a reliable
+// fallback either way.
 // A volume's recorded source can be a bare filename rather than a full path: 3MF projects saved
 // without "Store full source file paths in projects" (export_sources_full_pathnames, off by
 // default for portability -- see its Preferences tooltip) only keep the filename, since the point
