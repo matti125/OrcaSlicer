@@ -6820,6 +6820,7 @@ struct Plater::priv
     void on_source_file_changed(wxFileSystemWatcherEvent& evt);
     bool source_files_changed_on_disk();
     void maybe_auto_slice_after_reload();
+    std::string resolve_source_file_path(const std::string& recorded_path) const;
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -9987,6 +9988,25 @@ namespace {
 // network filesystem or local volume in a given setup delivers no event at all, nothing wakes the
 // check and the reload silently never happens. The --reload / --reload-and-slice CLI triggers are
 // unaffected by this and remain a reliable fallback regardless of which case a given setup hits.
+// A volume's recorded source can be a bare filename rather than a full path: 3MF projects saved
+// without "Store full source file paths in projects" (export_sources_full_pathnames, off by
+// default for portability -- see its Preferences tooltip) only keep the filename, since the point
+// is to not embed an absolute local path in a project someone might share. reload_from_disk()
+// already falls back to looking next to the *object's* recorded input_file in that case; this
+// does the analogous thing against the current project's own folder, which is what's actually
+// available here and covers the common case of keeping a source file alongside its project.
+std::string Plater::priv::resolve_source_file_path(const std::string& recorded_path) const
+{
+    if (recorded_path.empty() || fs::exists(recorded_path))
+        return recorded_path;
+    if (!m_project_folder.empty()) {
+        fs::path candidate = m_project_folder / fs::path(recorded_path).filename();
+        if (fs::exists(candidate))
+            return candidate.string();
+    }
+    return recorded_path;
+}
+
 void Plater::priv::update_source_file_watches()
 {
     if (!wxGetApp().app_config->get_bool("auto_reload_on_source_change")) {
@@ -10002,7 +10022,7 @@ void Plater::priv::update_source_file_watches()
     for (const ModelObject* object : model.objects)
         for (const ModelVolume* volume : object->volumes)
             if (!volume->source.input_file.empty())
-                current_files.insert(volume->source.input_file);
+                current_files.insert(resolve_source_file_path(volume->source.input_file));
 
     if (current_files == watched_source_files)
         return;
@@ -13618,6 +13638,14 @@ void Plater::priv::set_project_filename(const wxString& filename)
 
     if (!m_project_folder.empty() && !q->m_only_gcode)
         wxGetApp().mainframe->add_to_recent_projects(filename);
+
+    // Re-resolve and re-arm the source-file watches now that m_project_folder is current:
+    // resolve_source_file_path()'s project-folder fallback (for a volume whose recorded source
+    // degraded to a bare filename, e.g. a 3MF saved without "Store full source file paths") needs
+    // this to already be set, but object_list_changed() -- the usual place that recomputes the
+    // watch set -- fires before set_project_filename() during project load, not after, so its
+    // attempt at resolution sees an empty project folder and silently fails to find anything.
+    update_source_file_watches();
 }
 
 void Plater::priv::init_notification_manager()
