@@ -4088,13 +4088,14 @@ void MainFrame::request_select_tab(const wxString& id)
     wxQueueEvent(this, evt);
 }
 
-void MainFrame::slice_current_plate()
+void MainFrame::slice_current_plate(bool switch_to_preview)
 {
     wxGetApp().plater()->update(true, true);
     m_slice_enable = get_enable_slice_status();
     if (m_slice_enable) {
         wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
-        this->m_tabpanel->SelectPageByName(TAB_ID_PREVIEW);
+        if (switch_to_preview)
+            this->m_tabpanel->SelectPageByName(TAB_ID_PREVIEW);
     }
 }
 

@@ -1805,9 +1805,16 @@ void PreferencesDialog::create_items()
 
     auto item_auto_reload_source = create_item_checkbox(
         _L("Reload objects when their source file changes"),
-        _L("If enabled, OrcaSlicer will automatically reload objects from disk when the file they were imported from changes on disk, e.g. after re-exporting from CAD software. Combine with \"Auto slice after changes\" to also reslice automatically."),
+        _L("If enabled, OrcaSlicer will automatically reload objects from disk when the file they were imported from changes on disk, e.g. after re-exporting from CAD software. Combine with \"Also slice after auto-reloading a model\", just below, to also reslice automatically -- \"Auto slice after changes\" does not cover this, it only reacts to print/printer setting changes."),
         "auto_reload_on_source_change");
     g_sizer->Add(item_auto_reload_source);
+
+    auto item_auto_slice_after_reload = create_item_checkbox(
+        _L("Also slice after auto-reloading a model"),
+        _L("If enabled, OrcaSlicer will also slice the current plate after an automatic reload triggered by the option above. Stays on whatever tab is currently active rather than switching to Preview, "
+           "since this is a background action you didn't just explicitly ask for."),
+        "auto_slice_after_reload");
+    g_sizer->Add(item_auto_slice_after_reload);
  
     //// CONTROL > Camera
     g_sizer->Add(create_item_title(_L("Camera")), 1, wxEXPAND);

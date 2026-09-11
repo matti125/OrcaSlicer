@@ -128,6 +128,9 @@ void AppConfig::set_defaults()
         if (get("auto_reload_on_source_change").empty())
             set_bool("auto_reload_on_source_change", false);
 
+        if (get("auto_slice_after_reload").empty())
+            set_bool("auto_slice_after_reload", false);
+
         if (get("drop_project_action").empty())
             set_bool("drop_project_action", true);
 

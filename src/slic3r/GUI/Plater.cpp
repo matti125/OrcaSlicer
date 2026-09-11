@@ -6752,7 +6752,13 @@ struct Plater::priv
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
     bool reload_and_slice_after_cancel {false};
-    void slice_after_reload();
+    // Whether the deferred slice_after_reload() above (once the in-flight job it's waiting on
+    // finishes) should also switch to the Preview tab. Set alongside reload_and_slice_after_cancel
+    // by whichever caller requested it, since the two triggers that go through this deferred path
+    // -- the external --reload-and-slice CLI trigger and the auto-reload watcher's own optional
+    // auto-slice -- disagree on this.
+    bool reload_and_slice_switch_tab {true};
+    void slice_after_reload(bool switch_to_preview);
     bool m_is_publishing {false};
     int m_is_RightClickInLeftUI{-1};
     int m_cur_slice_plate;
@@ -6806,6 +6812,7 @@ struct Plater::priv
     void update_source_file_watches();
     void on_source_file_changed(wxFileSystemWatcherEvent& evt);
     bool source_files_changed_on_disk();
+    void maybe_auto_slice_after_reload();
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -7464,6 +7471,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             if (this->source_files_changed_on_disk()) {
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": source file(s) changed on disk, reloading";
                 this->q->reload_all_from_disk();
+                this->maybe_auto_slice_after_reload();
             }
         } else {
             evt.Skip();
@@ -7900,10 +7908,11 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             // of slicing directly: MainFrame::get_enable_slice_status() would see a slice as
             // still "in progress" and silently skip this request, leaving the freshly reloaded
             // geometry unsliced.
+            this->reload_and_slice_switch_tab = true;
             this->reload_and_slice_after_cancel = true;
             this->background_process.stop();
         } else {
-            this->slice_after_reload();
+            this->slice_after_reload(true);
         }
     });
     wxGetApp().other_instance_message_handler()->init(this->q);
@@ -9957,13 +9966,20 @@ namespace {
 // on Windows and inotify on Linux, both of which report renames more precisely, so this should work
 // there too, but it hasn't been built or tested on either platform.
 //
-// The bigger cross-platform risk either way is a network-mounted source directory: this was only
-// exercised against a share mounted at /Volumes/... on macOS, and it worked only because *some*
-// directory-level event still arrived to wake the check. inotify is well known not to fire
-// reliably over NFS mounts, and SMB shares on Windows can have similar gaps with
-// ReadDirectoryChangesW; if the network filesystem delivers no event at all, nothing wakes the
-// check and the reload silently never happens, regardless of OS. The --reload / --reload-and-slice
-// CLI triggers are unaffected by this and remain a reliable fallback for such setups.
+// Network-mounted vs. local source directories were both exercised on macOS, with a surprising
+// result: an SMB share mounted at /Volumes/... reliably delivered events end to end (watch armed,
+// event received, reload, and -- via maybe_auto_slice_after_reload() -- reslice all completing),
+// while a source file on the local APFS "Data" volume (under /Users/...) produced *no* watcher
+// event at all for either a plain touch or a real write-temp-then-rename, despite the watch itself
+// reporting successfully armed on that directory. That's the opposite of the usual expectation
+// that network filesystems are the less reliable case for change notifications (e.g. inotify is
+// well known not to fire reliably over NFS on Linux), and the root cause on the local-volume side
+// wasn't pinned down (a macOS privacy/TCC permission gap for the unsigned dev build is one
+// plausible explanation, but unconfirmed). Bottom line: reliability here depends on the specific
+// volume/OS combination in ways that haven't been fully mapped out, on any platform. If the
+// network filesystem or local volume in a given setup delivers no event at all, nothing wakes the
+// check and the reload silently never happens. The --reload / --reload-and-slice CLI triggers are
+// unaffected by this and remain a reliable fallback regardless of which case a given setup hits.
 void Plater::priv::update_source_file_watches()
 {
     if (!wxGetApp().app_config->get_bool("auto_reload_on_source_change")) {
@@ -10031,6 +10047,31 @@ bool Plater::priv::source_files_changed_on_disk()
         }
     }
     return changed;
+}
+
+// Distinct from "Auto slice after changes" (auto_slice_after_change), which only reacts to
+// print/printer *setting* changes via Plater::on_config_change() -- nothing calls it after a
+// model/geometry reload, so it never fires for the auto-reload watcher no matter how it's
+// configured. This is the model-change counterpart, scoped specifically to the watcher's own
+// reload rather than to reload_all_from_disk() in general: the manual "Reload from disk" menu
+// item and the explicit --reload CLI trigger both have a deliberate "don't slice" contract
+// (that's the whole reason --reload exists separately from --reload-and-slice), so a global hook
+// would silently violate it.
+void Plater::priv::maybe_auto_slice_after_reload()
+{
+    if (!wxGetApp().app_config->get_bool("auto_slice_after_reload"))
+        return;
+
+    // Stay on whatever tab is currently active rather than jumping to Preview: unlike an
+    // explicit --reload-and-slice trigger, this is a background action the user didn't just ask
+    // for, so rearranging what they're looking at would be surprising.
+    if (this->background_process.running() || this->m_is_slicing) {
+        this->reload_and_slice_switch_tab = false;
+        this->reload_and_slice_after_cancel = true;
+        this->background_process.stop();
+    } else {
+        this->slice_after_reload(false);
+    }
 }
 
 void Plater::priv::select_curr_plate_all()
@@ -12529,7 +12570,7 @@ bool Plater::priv::warnings_dialog()
 }
 
 //BBS: add project slice logic
-void Plater::priv::slice_after_reload()
+void Plater::priv::slice_after_reload(bool switch_to_preview)
 {
     // reload_all_from_disk() ends with its own update() call, which only *schedules* the
     // model-changed invalidation via a 500ms debounce timer (schedule_background_process())
@@ -12538,7 +12579,7 @@ void Plater::priv::slice_after_reload()
     // is_slice_result_valid() still reads stale "already sliced" and the slice is skipped.
     // Force the current plate's slice result invalid directly instead of waiting on it.
     partplate_list.get_curr_plate()->update_slice_result_valid_state(false);
-    wxGetApp().mainframe->slice_current_plate();
+    wxGetApp().mainframe->slice_current_plate(switch_to_preview);
 }
 
 void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
@@ -12759,7 +12800,8 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     }
     if (reload_and_slice_after_cancel) {
         reload_and_slice_after_cancel = false;
-        slice_after_reload();
+        slice_after_reload(reload_and_slice_switch_tab);
+        reload_and_slice_switch_tab = true;
     }
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", exit.");
