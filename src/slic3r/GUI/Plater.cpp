@@ -7480,6 +7480,10 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             if (this->source_files_changed_on_disk()) {
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": source file(s) changed on disk, reloading";
                 this->q->reload_all_from_disk();
+                // A rename-into-place leaves any file-level watch bound to the old inode, and the
+                // set of paths is unchanged so the regular refresh would skip re-arming it.
+                this->watched_source_files.clear();
+                this->update_source_file_watches();
                 this->maybe_auto_slice_after_reload();
             }
         } else {
@@ -9952,42 +9956,11 @@ namespace {
     }
 }
 
-// Keeps the file-system watcher in sync with the distinct set of ModelVolume::source.input_file
-// paths currently referenced by the model, so a running instance can reload objects automatically
-// when their source file changes on disk. Watches each source file's parent directory rather than
-// the file itself: export tools commonly write to a temp file and rename it into place, and an
-// inode-based watch on the file itself can silently stop tracking it across such a replace.
-//
-// Only verified on macOS so far, where the kqueue-based backend can report such a rename with
-// just the containing directory and no filename at all (see on_source_file_changed() and
-// source_files_changed_on_disk() below for how that's handled). wxWidgets uses ReadDirectoryChangesW
-// on Windows and inotify on Linux, both of which report renames more precisely, so this should work
-// there too, but it hasn't been built or tested on either platform.
-//
-// Network-mounted and local source directories were both exercised on macOS and both work: an
-// SMB share mounted at /Volumes/... and a small, dedicated local APFS directory (under /Users/...)
-// each reliably delivered events end to end (watch armed, event received, reload, and -- via
-// maybe_auto_slice_after_reload() -- reslice all completing). An earlier version of this comment
-// reported the local case as failing outright and speculated about a macOS TCC/permission gap;
-// that test happened to point the watch at this repo's own resources/profiles/ directory, which
-// has hundreds of files in it, and produced no events at all there even though the watch reported
-// itself successfully armed. Retesting against a small, purpose-made local directory worked
-// immediately with no permission changes in between, so the real variable was that directory's
-// size/business, not local-vs-network or any permission gap -- though the exact mechanism (kqueue
-// itself struggling with a large directory, contention with another watcher on the same tree such
-// as git's or Xcode's, or something else) wasn't pinned down either. Net effect for a normal
-// project folder (a CAD file plus maybe a few sliced outputs, not hundreds of entries): this
-// should work reliably regardless of local vs. network placement. If a given setup's directory
-// ever doesn't deliver events, nothing wakes the check and the reload silently never happens; the
-// --reload / --reload-and-slice CLI triggers are unaffected by this and remain a reliable
-// fallback either way.
 // A volume's recorded source can be a bare filename rather than a full path: 3MF projects saved
 // without "Store full source file paths in projects" (export_sources_full_pathnames, off by
-// default for portability -- see its Preferences tooltip) only keep the filename, since the point
-// is to not embed an absolute local path in a project someone might share. reload_from_disk()
-// already falls back to looking next to the *object's* recorded input_file in that case; this
-// does the analogous thing against the current project's own folder, which is what's actually
-// available here and covers the common case of keeping a source file alongside its project.
+// default) only keep the filename. reload_from_disk() falls back to looking next to the object's
+// own input_file in that case; this does the same against the current project's folder, which
+// covers the common case of keeping a source file alongside its project.
 std::string Plater::priv::resolve_source_file_path(const std::string& recorded_path) const
 {
     if (recorded_path.empty() || fs::exists(recorded_path))
@@ -10000,6 +9973,15 @@ std::string Plater::priv::resolve_source_file_path(const std::string& recorded_p
     return recorded_path;
 }
 
+// Keeps the file-system watcher in sync with the distinct set of source files currently
+// referenced by the model. Each file's parent directory is watched (a rename-into-place, the
+// common export pattern, only shows up as a directory-listing change) and, where the backend
+// supports it, the file itself (an in-place overwrite produces no directory event at all). The
+// event handler doesn't try to match the reported path -- macOS's kqueue backend can report a
+// rename with just the directory and no filename -- it only wakes a debounced mtime comparison
+// against the baseline recorded here. If a directory never delivers events (seen once with a
+// very large, busy directory), nothing wakes the check and the reload silently never happens;
+// the --reload CLI triggers remain a fallback.
 void Plater::priv::update_source_file_watches()
 {
     if (!wxGetApp().app_config->get_bool("auto_reload_on_source_change")) {
@@ -10046,19 +10028,16 @@ void Plater::priv::update_source_file_watches()
             source_file_watcher->Add(wxFileName(dir, wxEmptyString));
     }
 
-    // Also watch each file directly, in addition to its containing directory: a directory-level
-    // watch only fires when the directory's own listing changes (an entry added, removed, or
-    // renamed), not when an existing file is overwritten in place with the same name -- macOS's
-    // kqueue backend confirmed via testing to produce no event at all for a plain `cp` or `touch`
-    // onto an existing file, only for a real rename-into-place. Watching the file's own vnode
-    // catches that in-place-write case; the directory watch above remains what catches a
-    // rename-based replace (the scenario it was originally added for), since a file-level watch
-    // can lose track of the file across exactly that kind of swap once the underlying inode
-    // changes -- the two watches cover each other's blind spot.
+#ifndef _WIN32
+    // The directory watch above only fires when the listing changes; an in-place overwrite of an
+    // existing file needs a watch on the file itself. Not on Windows: wx's backend rejects
+    // file-level watches with a wxLogError dialog, and ReadDirectoryChangesW already reports
+    // in-place writes through the directory watch.
     for (const std::string& file : watched_source_files) {
         if (fs::exists(file))
             source_file_watcher->Add(wxFileName(file));
     }
+#endif
 }
 
 void Plater::priv::on_source_file_changed(wxFileSystemWatcherEvent&)
