@@ -4093,6 +4093,10 @@ void MainFrame::slice_current_plate(bool switch_to_preview)
     wxGetApp().plater()->update(true, true);
     m_slice_enable = get_enable_slice_status();
     if (m_slice_enable) {
+        // on_action_slice_plate() (the EVT_GLTOOLBAR_SLICE_PLATE handler below) otherwise always
+        // switches the 3D view to Preview itself, independent of this method's own tab-bar
+        // selection just below -- without this they'd disagree when switch_to_preview is false.
+        wxGetApp().plater()->set_suppress_next_slice_preview_switch(!switch_to_preview);
         wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
         if (switch_to_preview)
             this->m_tabpanel->SelectPageByName(TAB_ID_PREVIEW);

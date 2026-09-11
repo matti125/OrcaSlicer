@@ -6758,6 +6758,13 @@ struct Plater::priv
     // -- the external --reload-and-slice CLI trigger and the auto-reload watcher's own optional
     // auto-slice -- disagree on this.
     bool reload_and_slice_switch_tab {true};
+    // Consumed once by on_action_slice_plate(), which otherwise unconditionally calls
+    // select_view_3D("Preview") on every EVT_GLTOOLBAR_SLICE_PLATE regardless of who posted it --
+    // a separate mechanism from m_tabpanel's page selection above, and one MainFrame can't reach
+    // directly (it only has Plater's public interface). Without this, switch_to_preview=false
+    // still visibly showed the Preview content while leaving the tab bar reading "Prepare": two
+    // different "which view is showing" mechanisms disagreeing with each other.
+    bool suppress_next_slice_preview_switch {false};
     void slice_after_reload(bool switch_to_preview);
     bool m_is_publishing {false};
     int m_is_RightClickInLeftUI{-1};
@@ -12865,7 +12872,10 @@ void Plater::priv::on_action_slice_plate(SimpleEvent&)
         Model::setPrintSpeedTable(config, print_config);
         m_slice_all = false;
         q->reslice();
-        q->select_view_3D("Preview");
+        bool suppress = suppress_next_slice_preview_switch;
+        suppress_next_slice_preview_switch = false;
+        if (!suppress)
+            q->select_view_3D("Preview");
     }
 }
 
@@ -17695,6 +17705,8 @@ void Plater::update(bool conside_update_flag, bool force_background_processing_u
 }
 
 void Plater::object_list_changed() { p->object_list_changed(); }
+
+void Plater::set_suppress_next_slice_preview_switch(bool suppress) { p->suppress_next_slice_preview_switch = suppress; }
 
 Worker &Plater::get_ui_job_worker() { return p->m_worker; }
 
