@@ -77,6 +77,11 @@ namespace {
 
     // Reads one registry file, returning nullopt for anything unreadable, malformed, or stale
     // (pid no longer alive -- e.g. a crashed instance that never got to clean up after itself).
+    // A definitively stale entry (valid JSON, dead pid) is deleted on the spot rather than just
+    // skipped: this is the only case we can be sure about without risking a live file, so it's
+    // safe to prune opportunistically instead of leaving it to accumulate forever. A malformed or
+    // unreadable file is left alone -- it could be another instance's write in progress -- and
+    // will just get retried (or eventually cleaned up by prune_stale_entries() below) later.
     std::optional<json> read_live_entry(const fs::path& path)
     {
         boost::nowide::ifstream file(path.string());
@@ -90,8 +95,11 @@ namespace {
         }
         if (!j.contains("pid") || !j.contains("channel_id"))
             return std::nullopt;
-        if (!pid_is_alive(j["pid"].get<long>()))
+        if (!pid_is_alive(j["pid"].get<long>())) {
+            boost::system::error_code ec;
+            fs::remove(path, ec);
             return std::nullopt;
+        }
         return j;
     }
 
@@ -112,6 +120,22 @@ namespace {
         return std::nullopt;
     }
 
+    // Sweeps the whole registry for stale entries left behind by instances that didn't exit
+    // cleanly (a crash, a force-quit, a killed process -- none of which run
+    // InstanceRegistry::unregister_instance()). Run once per launch (from register_instance()) so
+    // the registry doesn't just grow forever between clean shutdowns; find_channel_if() above
+    // also prunes opportunistically as a side effect of any --target-instance/--target-file
+    // lookup, but a fresh launch is a much more reliable, regularly-occurring trigger than that.
+    void prune_stale_entries()
+    {
+        boost::system::error_code ec;
+        if (!fs::is_directory(registry_dir(), ec))
+            return;
+        for (const auto& entry : fs::directory_iterator(registry_dir()))
+            if (entry.path().extension() == ".json")
+                read_live_entry(entry.path()); // discards the result; only the deletion side effect matters here
+    }
+
 #endif // !_WIN32
 
 } // anonymous namespace
@@ -119,6 +143,7 @@ namespace {
 std::string InstanceRegistry::register_instance()
 {
 #ifndef _WIN32
+    prune_stale_entries();
     s_channel_id = boost::uuids::to_string(boost::uuids::random_generator()());
     s_registered = true;
     write_registry_file({});
