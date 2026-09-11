@@ -6751,6 +6751,7 @@ struct Plater::priv
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
     bool reload_and_slice_after_cancel {false};
+    void slice_after_reload();
     bool m_is_publishing {false};
     int m_is_RightClickInLeftUI{-1};
     int m_cur_slice_plate;
@@ -7880,13 +7881,13 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         if (this->background_process.running() || this->m_is_slicing) {
             // A previous reload-and-slice trigger's job is still in flight. Cancel it and
             // restart once the cancellation completes (see on_process_completed()), instead
-            // of calling reload_and_slice() directly: MainFrame::get_enable_slice_status()
-            // would see a slice as still "in progress" and silently skip this request,
-            // leaving the freshly reloaded geometry unsliced.
+            // of slicing directly: MainFrame::get_enable_slice_status() would see a slice as
+            // still "in progress" and silently skip this request, leaving the freshly reloaded
+            // geometry unsliced.
             this->reload_and_slice_after_cancel = true;
             this->background_process.stop();
         } else {
-            wxGetApp().mainframe->reload_and_slice();
+            this->slice_after_reload();
         }
     });
     wxGetApp().other_instance_message_handler()->init(this->q);
@@ -12406,6 +12407,18 @@ bool Plater::priv::warnings_dialog()
 }
 
 //BBS: add project slice logic
+void Plater::priv::slice_after_reload()
+{
+    // reload_all_from_disk() ends with its own update() call, which only *schedules* the
+    // model-changed invalidation via a 500ms debounce timer (schedule_background_process())
+    // rather than applying it right away. Checking the slice-enable state immediately
+    // afterward races that timer: about half the time it hasn't fired yet, so
+    // is_slice_result_valid() still reads stale "already sliced" and the slice is skipped.
+    // Force the current plate's slice result invalid directly instead of waiting on it.
+    partplate_list.get_curr_plate()->update_slice_result_valid_state(false);
+    wxGetApp().mainframe->slice_current_plate();
+}
+
 void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": enter, m_ignore_event %1%, status %2%")%m_ignore_event %evt.status();
@@ -12624,7 +12637,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     }
     if (reload_and_slice_after_cancel) {
         reload_and_slice_after_cancel = false;
-        wxGetApp().mainframe->reload_and_slice();
+        slice_after_reload();
     }
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", exit.");

@@ -701,7 +701,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
             }
             return;}
 #endif
-        if (evt.CmdDown() && evt.GetKeyCode() == 'R') { this->reload_and_slice(); return; }
+        if (evt.CmdDown() && evt.GetKeyCode() == 'R') { this->slice_current_plate(); return; }
         if (evt.CmdDown() && evt.ShiftDown() && evt.GetKeyCode() == 'G') {
             m_plater->apply_background_progress();
             m_print_enable = get_enable_print_status();
@@ -4088,17 +4088,9 @@ void MainFrame::request_select_tab(const wxString& id)
     wxQueueEvent(this, evt);
 }
 
-void MainFrame::reload_and_slice()
+void MainFrame::slice_current_plate()
 {
     wxGetApp().plater()->update(true, true);
-    // reload_all_from_disk() (used to reload from an external trigger) ends with its own
-    // Plater::priv::update() call, which only *schedules* the model-changed invalidation via
-    // a 500ms debounce timer (schedule_background_process()) rather than applying it right
-    // away. Checking the slice-enable state immediately afterward races that timer: about
-    // half the time it hasn't fired yet, so is_slice_result_valid() still reads stale
-    // "already sliced" and we'd skip the request entirely. Force the current plate's slice
-    // result invalid directly instead of waiting on that timer.
-    wxGetApp().plater()->get_partplate_list().get_curr_plate()->update_slice_result_valid_state(false);
     m_slice_enable = get_enable_slice_status();
     if (m_slice_enable) {
         wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
