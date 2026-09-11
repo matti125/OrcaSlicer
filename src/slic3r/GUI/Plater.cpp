@@ -6820,6 +6820,7 @@ struct Plater::priv
     void on_source_file_changed(wxFileSystemWatcherEvent& evt);
     bool source_files_changed_on_disk();
     void maybe_auto_slice_after_reload();
+    void request_reload_and_slice(bool switch_to_preview);
     std::string resolve_source_file_path(const std::string& recorded_path) const;
 
     std::string                 label_btn_export;
@@ -7910,18 +7911,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         wxGetApp().mainframe->Show();
         wxGetApp().mainframe->Raise();
         this->q->reload_all_from_disk();
-        if (this->background_process.running() || this->m_is_slicing) {
-            // A previous reload-and-slice trigger's job is still in flight. Cancel it and
-            // restart once the cancellation completes (see on_process_completed()), instead
-            // of slicing directly: MainFrame::get_enable_slice_status() would see a slice as
-            // still "in progress" and silently skip this request, leaving the freshly reloaded
-            // geometry unsliced.
-            this->reload_and_slice_switch_tab = true;
-            this->reload_and_slice_after_cancel = true;
-            this->background_process.stop();
-        } else {
-            this->slice_after_reload(true);
-        }
+        this->request_reload_and_slice(true);
     });
     wxGetApp().other_instance_message_handler()->init(this->q);
 
@@ -10109,12 +10099,21 @@ void Plater::priv::maybe_auto_slice_after_reload()
     // Stay on whatever tab is currently active rather than jumping to Preview: unlike an
     // explicit --reload-and-slice trigger, this is a background action the user didn't just ask
     // for, so rearranging what they're looking at would be surprising.
-    if (this->background_process.running() || this->m_is_slicing) {
-        this->reload_and_slice_switch_tab = false;
-        this->reload_and_slice_after_cancel = true;
-        this->background_process.stop();
+    request_reload_and_slice(false);
+}
+
+void Plater::priv::request_reload_and_slice(bool switch_to_preview)
+{
+    if (background_process.running() || m_is_slicing) {
+        // A previous job is still in flight. Cancel it and restart once the cancellation
+        // completes (see on_process_completed()), instead of slicing directly:
+        // MainFrame::get_enable_slice_status() would see a slice as still "in progress" and
+        // silently skip this request, leaving the freshly reloaded geometry unsliced.
+        reload_and_slice_switch_tab = switch_to_preview;
+        reload_and_slice_after_cancel = true;
+        background_process.stop();
     } else {
-        this->slice_after_reload(false);
+        slice_after_reload(switch_to_preview);
     }
 }
 
