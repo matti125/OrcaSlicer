@@ -62,6 +62,8 @@ namespace instance_check_internal
 		std::string    		     cl_string;
 		std::optional<std::string> target_instance;
 		std::optional<std::string> target_file;
+		bool                       wants_reload = false;
+		bool                       wants_reload_and_slice = false;
 	};
 	static CommandLineAnalysis process_command_line(int argc, char** argv)
 	{
@@ -82,8 +84,15 @@ namespace instance_check_internal
 				ret.target_instance = argv[++i];
 			else if (token == "--target-file" && i + 1 < argc)
 				ret.target_file = argv[++i];
-			else
+			else {
+				// Not consumed: still forwarded like any other token, so a running instance
+				// gets them too if single-instance mode ends up sending this command line.
+				if (token == "--reload")
+					ret.wants_reload = true;
+				else if (token == "--reload-and-slice")
+					ret.wants_reload_and_slice = true;
 				arguments.emplace_back(token);
+			}
 		}
 		ret.cl_string = escape_strings_cstyle(arguments);
 		BOOST_LOG_TRIVIAL(debug) << "single instance: " << 
@@ -435,6 +444,14 @@ bool instance_check(int argc, char** argv, bool app_config_single_instance)
 
 	if (! cla.should_send.has_value())
 		cla.should_send = app_config_single_instance;
+
+	if (! *cla.should_send && (cla.wants_reload || cla.wants_reload_and_slice)) {
+		// Without single-instance mode there is no "the" running instance to address, so
+		// --reload/--reload-and-slice would silently do nothing and this process would just
+		// open its own new window instead. Say so, rather than leaving that surprising.
+		BOOST_LOG_TRIVIAL(error) << "Instance check: --reload/--reload-and-slice requested, but single-instance mode is off; starting a new instance instead of reloading an existing one.";
+		std::cerr << "orcaslicer: --reload/--reload-and-slice needs single-instance mode to reach a running instance (enable \"Allow only one instance\" in Preferences, or pass --single-instance); starting a new window instead." << std::endl;
+	}
 #ifdef _WIN32
 	GUI::wxGetApp().init_single_instance_checker(lock_name + ".lock", data_dir() + "\\cache\\");
 	if (cla.should_send.value() && GUI::wxGetApp().single_instance_checker()->IsAnotherRunning()) {
