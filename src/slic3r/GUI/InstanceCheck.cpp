@@ -96,9 +96,23 @@ namespace instance_check_internal
 
 #ifdef _WIN32
 
-	static HWND orca_slicer_hwnd;
-	static BOOL CALLBACK EnumWindowsProc(_In_ HWND   hwnd, _In_ LPARAM lParam)
+	// What EnumWindowsProc should match a candidate top-level window against, and where it
+	// reports the result -- threaded through EnumWindows' LPARAM instead of a module-level
+	// static so the by-hash (default single-instance forwarding) and by-pid
+	// (--target-instance/--target-file) lookups can share one callback instead of two
+	// near-identical ones.
+	struct WindowMatchCriteria
 	{
+		bool     by_pid = false; // false: match instance_hash; true: match target_pid
+		uint64_t instance_hash = 0;
+		DWORD    target_pid = 0;
+		HWND     found = nullptr;
+	};
+
+	static BOOL CALLBACK EnumWindowsProc(_In_ HWND hwnd, _In_ LPARAM lParam)
+	{
+		auto* criteria = reinterpret_cast<WindowMatchCriteria*>(lParam);
+
 		// ORCA: Find the already-running instance by its window properties
 		TCHAR className[256]; // class names are limited to 255 characters, see https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-wndclassa
 		if (GetClassName(hwnd, className, 256) == 0)
@@ -107,54 +121,90 @@ namespace instance_check_internal
 		if (std::wstring(className) != L"wxWindowNR")
 			return true;
 
-		// Check if the candidate window has the same instance hash. If the
-		// properties are missing, it is not an OrcaSlicer main window.
-		HANDLE handle_minor = GetProp(hwnd, L"Instance_Hash_Minor");
-		HANDLE handle_major = GetProp(hwnd, L"Instance_Hash_Major");
-		if (handle_minor == nullptr || handle_major == nullptr)
-			return true;
+		if (criteria->by_pid) {
+			DWORD wnd_pid = 0;
+			GetWindowThreadProcessId(hwnd, &wnd_pid);
+			if (wnd_pid != criteria->target_pid)
+				return true;
+		} else {
+			// Check if the candidate window has the same instance hash. If the
+			// properties are missing, it is not an OrcaSlicer main window.
+			HANDLE handle_minor = GetProp(hwnd, L"Instance_Hash_Minor");
+			HANDLE handle_major = GetProp(hwnd, L"Instance_Hash_Major");
+			if (handle_minor == nullptr || handle_major == nullptr)
+				return true;
 
-		uint64_t other_instance_hash       = PtrToUint(handle_minor);
-		uint64_t other_instance_hash_major = PtrToUint(handle_major);
-		other_instance_hash_major          = other_instance_hash_major << 32;
-		other_instance_hash += other_instance_hash_major;
+			uint64_t other_instance_hash       = PtrToUint(handle_minor);
+			uint64_t other_instance_hash_major = PtrToUint(handle_major);
+			other_instance_hash_major          = other_instance_hash_major << 32;
+			other_instance_hash += other_instance_hash_major;
 
-		uint64_t my_instance_hash = GUI::wxGetApp().get_instance_hash_int();
-		if (my_instance_hash == other_instance_hash) {
-			BOOST_LOG_TRIVIAL(debug) << "win enum - found correct instance";
-			orca_slicer_hwnd = hwnd;
-			ShowWindow(hwnd, SW_SHOWMAXIMIZED);
-			SetForegroundWindow(hwnd);
-			return false;
+			if (other_instance_hash != criteria->instance_hash) {
+				BOOST_LOG_TRIVIAL(debug) << "win enum - found wrong instance";
+				return true;
+			}
 		}
 
-		BOOST_LOG_TRIVIAL(debug) << "win enum - found wrong instance";
+		BOOST_LOG_TRIVIAL(debug) << "win enum - found matching instance";
+		// Only locate the window here. Whether to show/raise/maximize it is decided once, by
+		// handle_message() below, based on the actual forwarded command (paths/downloads always
+		// go to front; --reload/--reload-and-slice only do with --activate). Forcing it here
+		// regardless of that would maximize the window on every plain --reload.
+		criteria->found = hwnd;
+		return false;
+	}
+
+	static bool deliver_to_hwnd(HWND hwnd, const std::string& message)
+	{
+		if (hwnd == nullptr)
+			return false;
+
+		// Whether to actually raise the window is decided later, by handle_message() in the
+		// target process, based on the message content (--activate etc, see the comment in
+		// EnumWindowsProc above). But Windows blocks a background process from calling
+		// SetForegroundWindow on itself with no recent user input, so if we don't pre-authorize
+		// it here -- while *this* process still holds that right, having just been launched by
+		// the user -- the target's later Raise() would silently fail to do anything.
+		DWORD target_process_id = 0;
+		GetWindowThreadProcessId(hwnd, &target_process_id);
+		AllowSetForegroundWindow(target_process_id);
+
+		std::wstring wstr = boost::nowide::widen(message);
+
+		//Create a COPYDATASTRUCT to send the information
+		//cbData represents the size of the information we want to send.
+		//lpData represents the information we want to send.
+		//dwData is an ID defined by us(this is a type of ID different than WM_COPYDATA).
+		COPYDATASTRUCT data_to_send = { 0 };
+		data_to_send.dwData = 1;
+		data_to_send.cbData = static_cast<DWORD>(sizeof(TCHAR) * (wstr.size() + 1));
+		data_to_send.lpData = const_cast<wchar_t*>(wstr.c_str());
+		SendMessage(hwnd, WM_COPYDATA, 0, (LPARAM)&data_to_send);
 		return true;
 	}
-	static bool send_message(const std::string& message, const std::string &version)
-	{
-		if (!EnumWindows(EnumWindowsProc, 0)) {
-			std::wstring wstr = boost::nowide::widen(message);
-			std::unique_ptr<LPWSTR> command_line_args = std::make_unique<LPWSTR>(const_cast<LPWSTR>(wstr.c_str()));
-			/*LPWSTR command_line_args = new wchar_t[wstr.size() + 1];
-			copy(wstr.begin(), wstr.end(), command_line_args);
-			command_line_args[wstr.size()] = 0;*/
 
-			//Create a COPYDATASTRUCT to send the information
-			//cbData represents the size of the information we want to send.
-			//lpData represents the information we want to send.
-			//dwData is an ID defined by us(this is a type of ID different than WM_COPYDATA).
-			COPYDATASTRUCT data_to_send = { 0 };
-			data_to_send.dwData = 1;
-			data_to_send.cbData = sizeof(TCHAR) * (wcslen(*command_line_args.get()) + 1);
-			data_to_send.lpData = *command_line_args.get();
-			SendMessage(orca_slicer_hwnd, WM_COPYDATA, 0, (LPARAM)&data_to_send);
-			return true;  
-		}
-	    return false;
+	static bool send_message(const std::string& message, const std::string &/*version*/)
+	{
+		WindowMatchCriteria criteria;
+		criteria.instance_hash = GUI::wxGetApp().get_instance_hash_int();
+		if (!EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&criteria)))
+			return deliver_to_hwnd(criteria.found, message);
+		return false;
 	}
 
-#else 
+	// Relay to a specific pid (--target-instance/--target-file), instead of "the" instance
+	// sharing this exe path's hash.
+	static bool send_message_to_pid(const std::string& message, DWORD target_pid)
+	{
+		WindowMatchCriteria criteria;
+		criteria.by_pid = true;
+		criteria.target_pid = target_pid;
+		if (!EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&criteria)))
+			return deliver_to_hwnd(criteria.found, message);
+		return false;
+	}
+
+#else
 
 	static bool get_lock(const std::string& name, const std::string& path)
 	{
@@ -346,7 +396,7 @@ bool instance_check(int argc, char** argv, bool app_config_single_instance)
 	instance_check_internal::CommandLineAnalysis cla = instance_check_internal::process_command_line(argc, argv);
 
 	if (cla.target_instance.has_value() || cla.target_file.has_value()) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
 		// Addressing a specific instance is independent of whether *this* executable path has
 		// another instance of itself running, so resolve and relay directly rather than falling
 		// into the single-instance-lock flow below (which only ever knows about "the" instance
@@ -359,11 +409,26 @@ bool instance_check(int argc, char** argv, bool app_config_single_instance)
 			std::cerr << "orcaslicer: no matching running instance found for --target-instance/--target-file" << std::endl;
 			return true;
 		}
+#if defined(__APPLE__)
 		instance_check_internal::send_message(cla.cl_string, *channel);
+#else // _WIN32: the resolved channel is a stringified pid (see InstanceRegistry::register_instance)
+		DWORD target_pid = 0;
+		bool  delivered = false;
+		try {
+			target_pid = static_cast<DWORD>(std::stoul(*channel));
+			delivered = instance_check_internal::send_message_to_pid(cla.cl_string, target_pid);
+		} catch (const std::exception&) {
+			delivered = false;
+		}
+		if (! delivered) {
+			BOOST_LOG_TRIVIAL(error) << "Instance check: matched a registered instance for --target-instance/--target-file, but could not deliver to it (its window may already be gone).";
+			std::cerr << "orcaslicer: matched a running instance for --target-instance/--target-file, but could not deliver to it" << std::endl;
+		}
+#endif
 #else
-		// Only the macOS notification-center transport can address a per-instance channel; the
-		// Windows and Linux transports are keyed on the executable's hash alone.
-		std::cerr << "orcaslicer: --target-instance/--target-file are only supported on macOS" << std::endl;
+		// Only the macOS and Windows transports can address a per-instance channel; the Linux
+		// DBus transport is keyed on the executable's hash alone.
+		std::cerr << "orcaslicer: --target-instance/--target-file are only supported on macOS and Windows" << std::endl;
 #endif
 		return true;
 	}
@@ -414,7 +479,9 @@ void OtherInstanceMessageHandler::init(wxEvtHandler* callback_evt_handler)
 #if defined(__APPLE__)
 	std::string channel_id = InstanceRegistry::register_instance();
 	this->register_for_messages(wxGetApp().get_instance_hash_string(), channel_id);
-#endif //__APPLE__
+#elif defined(_WIN32)
+	InstanceRegistry::register_instance(); // return value unused: no channel/listener to set up
+#endif
 
 #ifdef BACKGROUND_MESSAGE_LISTENER
 	m_thread = boost::thread((boost::bind(&OtherInstanceMessageHandler::listen, this)));
@@ -436,6 +503,8 @@ void OtherInstanceMessageHandler::shutdown(MainFrame* main_frame)
 #if __APPLE__
 		//delete macos implementation
 		this->unregister_for_messages();
+		InstanceRegistry::unregister_instance();
+#elif defined(_WIN32)
 		InstanceRegistry::unregister_instance();
 #endif //__APPLE__
 #ifdef BACKGROUND_MESSAGE_LISTENER
