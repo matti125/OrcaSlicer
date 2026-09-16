@@ -46,6 +46,7 @@
 #include <wx/event.h>
 #include <wx/evtloop.h>
 #include <wx/timer.h>
+#include <wx/fswatcher.h>
 #include <wx/wrapsizer.h>
 #ifdef _WIN32
 #include <wx/richtooltip.h>
@@ -6748,6 +6749,14 @@ struct Plater::priv
     std::string m_broken_shown_sig;
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
+    bool slice_after_reload_pending {false};
+    // Consumed once by on_action_slice_plate(), which otherwise unconditionally calls
+    // select_view_3D("Preview") on every EVT_GLTOOLBAR_SLICE_PLATE regardless of who posted it --
+    // a separate mechanism from m_tabpanel's page selection, and one MainFrame can't reach
+    // directly (it only has Plater's public interface). Without this, switch_to_preview=false
+    // still visibly showed the Preview content while leaving the tab bar reading "Prepare".
+    bool suppress_next_slice_preview_switch {false};
+    void slice_after_reload();
     bool m_is_publishing {false};
     int m_is_RightClickInLeftUI{-1};
     int m_cur_slice_plate;
@@ -6793,6 +6802,16 @@ struct Plater::priv
 
     wxTimer                     background_process_timer;
     wxTimer                     auto_reslice_timer;
+    wxTimer                     source_reload_timer;
+    wxFileSystemWatcher*        source_file_watcher{ nullptr };
+    std::set<std::string>       watched_source_files;
+    std::map<std::string, std::time_t> watched_source_file_mtimes;
+
+    void update_source_file_watches();
+    void on_source_file_changed(wxFileSystemWatcherEvent& evt);
+    bool source_files_changed_on_disk();
+    void maybe_auto_slice_after_reload();
+    std::string resolve_source_file_path(const std::string& recorded_path) const;
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -7440,6 +7459,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
 
     this->background_process_timer.SetOwner(this->q, 0);
     this->auto_reslice_timer.SetOwner(this->q, 0);
+    this->source_reload_timer.SetOwner(this->q, 0);
     this->q->Bind(wxEVT_TIMER, [this](wxTimerEvent &evt)
     {
         if (&evt.GetTimer() == &this->background_process_timer) {
@@ -7448,6 +7468,17 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         } else if (&evt.GetTimer() == &this->auto_reslice_timer) {
             this->auto_reslice_timer.Stop();
             this->trigger_auto_reslice_now();
+        } else if (&evt.GetTimer() == &this->source_reload_timer) {
+            this->source_reload_timer.Stop();
+            if (this->source_files_changed_on_disk()) {
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": source file(s) changed on disk, reloading";
+                this->q->reload_all_from_disk();
+                // A rename-into-place leaves any file-level watch bound to the old inode, and the
+                // set of paths is unchanged so the regular refresh would skip re-arming it.
+                this->watched_source_files.clear();
+                this->update_source_file_watches();
+                this->maybe_auto_slice_after_reload();
+            }
         } else {
             evt.Skip();
         }
@@ -7880,6 +7911,10 @@ Plater::priv::~priv()
 {
     if (config != nullptr)
         delete config;
+    if (source_file_watcher != nullptr) {
+        source_file_watcher->RemoveAll();
+        delete source_file_watcher;
+    }
     // Saves the database of visited (already shown) hints into hints.ini.
     notification_manager->deactivate_loaded_hints();
     main_frame->m_tabpanel->Unbind(wxEVT_NOTEBOOK_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
@@ -10065,6 +10100,149 @@ void Plater::priv::object_list_changed()
     wxGetApp().params_panel()->notify_object_config_changed();
 
     q->mark_plate_toolbar_image_dirty();
+
+    update_source_file_watches();
+}
+
+namespace {
+    // Sentinel for "file does not currently exist" so a create is detected as a change too.
+    constexpr std::time_t source_file_missing_mtime = 0;
+
+    std::time_t get_source_file_mtime(const std::string& path)
+    {
+        boost::system::error_code ec;
+        std::time_t mtime = boost::filesystem::last_write_time(path, ec);
+        return ec ? source_file_missing_mtime : mtime;
+    }
+}
+
+// A volume's recorded source can be a bare filename rather than a full path: 3MF projects saved
+// without "Store full source file paths in projects" (export_sources_full_pathnames, off by
+// default) only keep the filename. reload_from_disk() falls back to looking next to the object's
+// own input_file in that case; this does the same against the current project's folder, which
+// covers the common case of keeping a source file alongside its project.
+std::string Plater::priv::resolve_source_file_path(const std::string& recorded_path) const
+{
+    if (recorded_path.empty() || fs::exists(recorded_path))
+        return recorded_path;
+    if (!m_project_folder.empty()) {
+        fs::path candidate = m_project_folder / fs::path(recorded_path).filename();
+        if (fs::exists(candidate))
+            return candidate.string();
+    }
+    return recorded_path;
+}
+
+// Keeps the file-system watcher in sync with the distinct set of source files currently
+// referenced by the model. Each file's parent directory is watched (a rename-into-place, the
+// common export pattern, only shows up as a directory-listing change) and, where the backend
+// supports it, the file itself (an in-place overwrite produces no directory event at all). The
+// event handler doesn't try to match the reported path -- macOS's kqueue backend can report a
+// rename with just the directory and no filename -- it only wakes a debounced mtime comparison
+// against the baseline recorded here. If a directory never delivers events (seen once with a
+// very large, busy directory), nothing wakes the check and the reload silently never happens;
+// the manual "Reload from disk" menu item remains a fallback.
+void Plater::priv::update_source_file_watches()
+{
+    if (!wxGetApp().app_config->get_bool("auto_reload_on_source_change")) {
+        if (source_file_watcher != nullptr && !watched_source_files.empty()) {
+            source_file_watcher->RemoveAll();
+            watched_source_files.clear();
+            watched_source_file_mtimes.clear();
+        }
+        return;
+    }
+
+    std::set<std::string> current_files;
+    for (const ModelObject* object : model.objects)
+        for (const ModelVolume* volume : object->volumes)
+            if (!volume->source.input_file.empty())
+                current_files.insert(resolve_source_file_path(volume->source.input_file));
+
+    if (current_files == watched_source_files)
+        return;
+
+    if (source_file_watcher == nullptr) {
+        source_file_watcher = new wxFileSystemWatcher();
+        source_file_watcher->SetOwner(q);
+        q->Bind(wxEVT_FSWATCHER, [this](wxFileSystemWatcherEvent& evt) { this->on_source_file_changed(evt); });
+    }
+
+    source_file_watcher->RemoveAll();
+    watched_source_files = std::move(current_files);
+
+    // Record a baseline mtime for each tracked file so the debounced check can tell whether it
+    // actually changed, rather than relying on the watcher event to name the file: directory-level
+    // backends (e.g. macOS's kqueue-based one) can report a rename-into-place with just the
+    // containing directory and no filename at all, which a path-matching approach would miss.
+    std::map<std::string, std::time_t> new_mtimes;
+    std::set<std::string> watched_dirs;
+    for (const std::string& file : watched_source_files) {
+        new_mtimes[file] = get_source_file_mtime(file);
+        watched_dirs.insert(fs::path(file).parent_path().string());
+    }
+    watched_source_file_mtimes = std::move(new_mtimes);
+
+    for (const std::string& dir : watched_dirs) {
+        if (!dir.empty() && fs::is_directory(dir))
+            source_file_watcher->Add(wxFileName(dir, wxEmptyString));
+    }
+
+#ifndef _WIN32
+    // The directory watch above only fires when the listing changes; an in-place overwrite of an
+    // existing file needs a watch on the file itself. Not on Windows: wx's backend rejects
+    // file-level watches with a wxLogError dialog, and ReadDirectoryChangesW already reports
+    // in-place writes through the directory watch.
+    for (const std::string& file : watched_source_files) {
+        if (fs::exists(file))
+            source_file_watcher->Add(wxFileName(file));
+    }
+#endif
+}
+
+void Plater::priv::on_source_file_changed(wxFileSystemWatcherEvent&)
+{
+    // Any event in a watched directory just wakes the debounced check below; see the comment in
+    // update_source_file_watches() for why we don't try to match the event's reported path.
+    source_reload_timer.Start(500, wxTIMER_ONE_SHOT);
+}
+
+// Called once the debounce timer fires. Returns true (and updates the stored baseline) if any
+// tracked source file's mtime actually changed since we last checked.
+bool Plater::priv::source_files_changed_on_disk()
+{
+    bool changed = false;
+    for (auto& [file, mtime] : watched_source_file_mtimes) {
+        std::time_t current = get_source_file_mtime(file);
+        if (current != mtime) {
+            mtime = current;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+// Distinct from "Auto slice after changes" (auto_slice_after_change), which only reacts to
+// print/printer *setting* changes via Plater::on_config_change() -- nothing calls it after a
+// model/geometry reload, so it never fires for the auto-reload watcher no matter how it's
+// configured. This is the model-change counterpart, scoped specifically to the watcher's own
+// reload rather than to reload_all_from_disk() in general: the manual "Reload from disk" menu
+// item has a deliberate "don't slice" contract that a global hook would silently violate.
+void Plater::priv::maybe_auto_slice_after_reload()
+{
+    if (!wxGetApp().app_config->get_bool("auto_slice_after_reload"))
+        return;
+
+    if (background_process.running() || m_is_slicing) {
+        // A previous job is still in flight. Cancel it and restart once the cancellation
+        // completes (see on_process_completed()), instead of slicing directly:
+        // MainFrame::get_enable_slice_status() would see a slice as still "in progress" and
+        // silently skip this request, leaving the freshly reloaded geometry unsliced.
+        slice_after_reload_pending = true;
+        background_process.stop();
+    } else {
+        slice_after_reload();
+    }
 }
 
 void Plater::priv::select_curr_plate_all()
@@ -12568,6 +12746,21 @@ bool Plater::priv::warnings_dialog()
 }
 
 //BBS: add project slice logic
+void Plater::priv::slice_after_reload()
+{
+    // reload_all_from_disk() ends with its own update() call, which only *schedules* the
+    // model-changed invalidation via a 500ms debounce timer (schedule_background_process())
+    // rather than applying it right away. Checking the slice-enable state immediately
+    // afterward races that timer: about half the time it hasn't fired yet, so
+    // is_slice_result_valid() still reads stale "already sliced" and the slice is skipped.
+    // Force the current plate's slice result invalid directly instead of waiting on it.
+    partplate_list.get_curr_plate()->update_slice_result_valid_state(false);
+    // Stay on whatever tab is currently active rather than jumping to Preview: this is a
+    // background action the user didn't just ask for, so rearranging what they're looking at
+    // would be surprising.
+    wxGetApp().mainframe->slice_current_plate(false);
+}
+
 void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": enter, m_ignore_event %1%, status %2%")%m_ignore_event %evt.status();
@@ -12784,6 +12977,10 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         auto_reslice_after_cancel = false;
         schedule_auto_reslice_if_needed();
     }
+    if (slice_after_reload_pending) {
+        slice_after_reload_pending = false;
+        slice_after_reload();
+    }
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", exit.");
 }
@@ -12846,7 +13043,10 @@ void Plater::priv::on_action_slice_plate(SimpleEvent&)
         Model::setPrintSpeedTable(config, print_config);
         m_slice_all = false;
         q->reslice();
-        q->select_view_3D("Preview");
+        bool suppress = suppress_next_slice_preview_switch;
+        suppress_next_slice_preview_switch = false;
+        if (!suppress)
+            q->select_view_3D("Preview");
     }
 }
 
@@ -13589,6 +13789,14 @@ void Plater::priv::set_project_filename(const wxString& filename)
 
     if (!m_project_folder.empty() && !q->m_only_gcode)
         wxGetApp().mainframe->add_to_recent_projects(filename);
+
+    // Re-resolve and re-arm the source-file watches now that m_project_folder is current:
+    // resolve_source_file_path()'s project-folder fallback (for a volume whose recorded source
+    // degraded to a bare filename, e.g. a 3MF saved without "Store full source file paths") needs
+    // this to already be set, but object_list_changed() -- the usual place that recomputes the
+    // watch set -- fires before set_project_filename() during project load, not after, so its
+    // attempt at resolution sees an empty project folder and silently fails to find anything.
+    update_source_file_watches();
 }
 
 void Plater::priv::init_notification_manager()
@@ -17678,6 +17886,8 @@ void Plater::update(bool conside_update_flag, bool force_background_processing_u
 }
 
 void Plater::object_list_changed() { p->object_list_changed(); }
+
+void Plater::set_suppress_next_slice_preview_switch(bool suppress) { p->suppress_next_slice_preview_switch = suppress; }
 
 Worker &Plater::get_ui_job_worker() { return p->m_worker; }
 
