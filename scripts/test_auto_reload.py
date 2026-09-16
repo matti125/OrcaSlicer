@@ -49,7 +49,11 @@ def newest_log(log_dir):
 def read_prefs(data_dir):
     try:
         with open(os.path.join(data_dir, "OrcaSlicer.conf"), encoding="utf-8") as f:
-            app = json.load(f).get("app", {})
+            text = f.read()
+        # OrcaSlicer appends a trailing "# MD5 checksum ..." line after the closing brace --
+        # not valid JSON, so parse just the leading object and ignore whatever follows it.
+        config, _ = json.JSONDecoder().raw_decode(text)
+        app = config.get("app", {})
     except (OSError, ValueError):
         return None
     def truthy(v):
