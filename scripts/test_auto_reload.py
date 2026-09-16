@@ -92,18 +92,22 @@ class LogTail:
         return marker not in self.buf
 
 
-def write_cube_stl(path, size, atomic=False):
-    s = float(size)
-    v = [(0, 0, 0), (s, 0, 0), (s, s, 0), (0, s, 0), (0, 0, s), (s, 0, s), (s, s, s), (0, s, s)]
-    faces = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
+BOX_FACES = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
              (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
-    lines = ["solid cube"]
-    for a, b, c in faces:
-        lines.append("  facet normal 0 0 0\n    outer loop")
-        for i in (a, b, c):
-            lines.append("      vertex %g %g %g" % v[i])
-        lines.append("    endloop\n  endfacet")
-    lines.append("endsolid cube\n")
+
+
+def write_stl(path, boxes, atomic=False):
+    """Writes an ASCII STL of axis-aligned boxes given as (x0, y0, z0, x1, y1, z1)."""
+    lines = ["solid test"]
+    for x0, y0, z0, x1, y1, z1 in boxes:
+        v = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+             (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+        for a, b, c in BOX_FACES:
+            lines.append("  facet normal 0 0 0\n    outer loop")
+            for i in (a, b, c):
+                lines.append("      vertex %g %g %g" % v[i])
+            lines.append("    endloop\n  endfacet")
+    lines.append("endsolid test\n")
     data = "\n".join(lines)
     if atomic:
         tmp = path + ".tmp"
@@ -113,6 +117,18 @@ def write_cube_stl(path, size, atomic=False):
     else:
         with open(path, "w") as f:
             f.write(data)
+
+
+def write_cube_stl(path, size, atomic=False):
+    s = float(size)
+    write_stl(path, [(0, 0, 0, s, s, s)], atomic)
+
+
+def write_pillars_stl(path, height, n=16, pitch=6.0, width=4.0):
+    """An n x n grid of thin pillars: hundreds of islands per layer, so it slices slowly."""
+    boxes = [(i * pitch, j * pitch, 0, i * pitch + width, j * pitch + width, float(height))
+             for i in range(n) for j in range(n)]
+    write_stl(path, boxes)
 
 
 def ask(prompt):
@@ -151,6 +167,11 @@ def main():
     parser.add_argument("--timeout", type=float, default=20.0, help="seconds to wait for a reload/slice (default 20)")
     parser.add_argument("--quiet-window", type=float, default=8.0,
                         help="seconds to wait when asserting that nothing happens (default 8)")
+    parser.add_argument("--slow-height", type=float, default=60.0,
+                        help="pillar height in mm for the mid-slice test; raise it if the slice finishes "
+                             "before the second change lands (default 60)")
+    parser.add_argument("--mid-slice-delay", type=float, default=3.0,
+                        help="seconds into the slow slice at which the second change is written (default 3)")
     # Not a system temp dir: macOS file dialogs hide /var, where those live.
     parser.add_argument("--work-dir", default=os.path.expanduser("~/orca_autoreload_test"),
                         help="where to put the test model (default ~/orca_autoreload_test)")
@@ -223,16 +244,41 @@ def main():
             record("D3 slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 3))
         record("D4 stayed on the current tab", ask("  Is the Prepare tab still selected (no jump to Preview)?"))
 
+    h1, h2 = args.slow_height, args.slow_height / 2
+    print("\n[F] Change arriving mid-slice: cube -> %g mm pillar grid, then %g mm while that slices" % (h1, h2))
+    tail.mark(); time.sleep(1.5)
+    write_pillars_stl(stl, h1)
+    ok = tail.wait_for(RELOAD_MARK, args.timeout) and tail.wait_for(SLICE_START_MARK, args.timeout)
+    record("F1 reload and slice start for the pillar grid", ok)
+    if ok:
+        time.sleep(args.mid_slice_delay)
+        tail._read()
+        still_running = SLICE_DONE_MARK not in tail.buf
+        record("F2 first slice still running when the second change is written", still_running,
+               "" if still_running else "it already finished; raise --slow-height or lower --mid-slice-delay")
+        tail.mark()
+        write_pillars_stl(stl, h2)
+        ok = tail.wait_for(RELOAD_MARK, args.timeout)
+        record("F3 reload while slicing", ok, "" if ok else "no reload line within %gs" % args.timeout)
+        if ok:
+            restarted = tail.wait_for(SLICE_START_MARK, args.timeout)
+            record("F4 slice restarted after the reload", restarted,
+                   "" if restarted else "no second slice-start line within %gs" % args.timeout)
+            if restarted:
+                done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 6)
+                record("F5 restarted slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 6))
+            record("F6 final geometry is the second change", ask("  Are the pillars %g mm tall (not %g)?" % (h2, h1)))
+
     # --- reload off -----------------------------------------------------------------------
     pause("Preferences: DISABLE '%s' (leave the slice option as it is)." % PREF_RELOAD_LABEL)
     check_prefs(args.data_dir, want_reload=False, want_slice=True)
-    print("\n[E] In-place overwrite with auto-reload off (25 -> 35 mm)")
+    print("\n[E] In-place overwrite with auto-reload off (pillars -> 35 mm cube)")
     tail.mark(); time.sleep(1.5)
     write_cube_stl(stl, 35)
     quiet = tail.absent_after(RELOAD_MARK, args.quiet_window)
     record("E1 no reload when '%s' is off" % PREF_RELOAD_LABEL, quiet, "" if quiet else "a reload happened anyway")
     if quiet:
-        record("E2 model unchanged", ask("  Is the cube still 25 mm?"))
+        record("E2 model unchanged", ask("  Is the model still the pillar grid (no cube)?"))
 
     # --- summary --------------------------------------------------------------------------
     failed = [r for r in results if not r[1]]
