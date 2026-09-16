@@ -5,7 +5,10 @@ Drives the on-disk side of the feature (in-place overwrite, rename-into-place) a
 running OrcaSlicer and checks the outcome in OrcaSlicer's own log. The GUI steps that can't
 be scripted (importing the model, toggling the two preferences) are prompted for.
 
-    python3 scripts/test_auto_reload.py [--data-dir DIR] [--timeout SECONDS]
+    python3 scripts/test_auto_reload.py [options]
+
+Run with --help for the full list of options (data dir, timeouts, pillar-grid height for the
+mid-slice test, work dir for the generated model).
 
 Requires OrcaSlicer's log severity at the default "info" level (Preferences > Log level).
 """
@@ -94,6 +97,10 @@ class LogTail:
         time.sleep(wait)
         self._read()
         return marker not in self.buf
+
+    def has_seen(self, marker):
+        self._read()
+        return marker in self.buf
 
 
 BOX_FACES = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
@@ -264,8 +271,7 @@ def main():
     record("F1 reload and slice start for the pillar grid", ok)
     if ok:
         time.sleep(args.mid_slice_delay)
-        tail._read()
-        still_running = SLICE_DONE_MARK not in tail.buf
+        still_running = not tail.has_seen(SLICE_DONE_MARK)
         record("F2 first slice still running when the second change is written", still_running,
                "" if still_running else "it already finished; raise --slow-height or lower --mid-slice-delay")
         tail.mark()
