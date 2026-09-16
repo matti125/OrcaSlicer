@@ -15,9 +15,7 @@ import glob
 import json
 import os
 import platform
-import shutil
 import sys
-import tempfile
 import time
 
 RELOAD_MARK      = "source file(s) changed on disk, reloading"
@@ -153,13 +151,17 @@ def main():
     parser.add_argument("--timeout", type=float, default=20.0, help="seconds to wait for a reload/slice (default 20)")
     parser.add_argument("--quiet-window", type=float, default=8.0,
                         help="seconds to wait when asserting that nothing happens (default 8)")
+    # Not a system temp dir: macOS file dialogs hide /var, where those live.
+    parser.add_argument("--work-dir", default=os.path.expanduser("~/orca_autoreload_test"),
+                        help="where to put the test model (default ~/orca_autoreload_test)")
     args = parser.parse_args()
 
     log_dir = os.path.join(args.data_dir, "log")
     if not os.path.isdir(log_dir):
         sys.exit("No log directory at %s -- pass --data-dir if OrcaSlicer stores its data elsewhere." % log_dir)
 
-    work_dir = tempfile.mkdtemp(prefix="orca_autoreload_")
+    work_dir = os.path.abspath(args.work_dir)
+    os.makedirs(work_dir, exist_ok=True)
     stl = os.path.join(work_dir, "cube.stl")
     write_cube_stl(stl, 20)
     results = []
@@ -240,7 +242,11 @@ def main():
     if failed:
         print("Test files left in %s; log at %s" % (work_dir, log_path))
         sys.exit(1)
-    shutil.rmtree(work_dir, ignore_errors=True)
+    os.remove(stl)
+    try:
+        os.rmdir(work_dir)  # only if nothing else is in it
+    except OSError:
+        pass
     print("All passed. Remember to restore the two preferences to the values you want.")
 
 
