@@ -146,19 +146,27 @@ def pause(text):
     input("Press Enter when done... ")
 
 
-def check_prefs(data_dir, want_reload, want_slice):
-    prefs = read_prefs(data_dir)
-    if prefs is None:
-        print("  (could not read OrcaSlicer.conf to cross-check the preferences)")
-        return
-    mismatches = []
-    if prefs[PREF_RELOAD] != want_reload:
-        mismatches.append("%s = %s" % (PREF_RELOAD_LABEL, prefs[PREF_RELOAD]))
-    if prefs[PREF_SLICE] != want_slice:
-        mismatches.append("%s = %s" % (PREF_SLICE_LABEL, prefs[PREF_SLICE]))
-    if mismatches:
-        print("  NOTE: OrcaSlicer.conf currently reads: " + "; ".join(mismatches))
-        print("        (the file can lag behind a just-toggled checkbox; the tests below are what count)")
+def require_prefs(data_dir, want_reload, want_slice):
+    """Blocks until OrcaSlicer.conf shows the two preferences in the wanted state.
+
+    Toggling a checkbox in Preferences saves the file immediately, so a mismatch here means
+    the checkbox really is in the wrong state, not that the file is lagging.
+    """
+    wanted = {PREF_RELOAD: (PREF_RELOAD_LABEL, want_reload), PREF_SLICE: (PREF_SLICE_LABEL, want_slice)}
+    while True:
+        prefs = read_prefs(data_dir)
+        if prefs is None:
+            print("  Could not read OrcaSlicer.conf under %s, so the preferences can't be verified." % data_dir)
+            if ask("  Continue anyway?"):
+                return
+            sys.exit(1)
+        wrong = [(label, want) for key, (label, want) in wanted.items() if prefs[key] != want]
+        if not wrong:
+            print("  Preferences verified: %s=%s, %s=%s" % (PREF_RELOAD_LABEL, want_reload, PREF_SLICE_LABEL, want_slice))
+            return
+        for label, want in wrong:
+            print("  '%s' must be %s but is %s" % (label, "ON" if want else "OFF", "OFF" if want else "ON"))
+        input("  Fix it in Preferences, then press Enter to re-check... ")
 
 
 def main():
@@ -202,7 +210,7 @@ def main():
         sys.exit("No debug_*.log found under %s -- is OrcaSlicer running?" % log_dir)
     print("Following log: %s" % log_path)
     tail = LogTail(log_path)
-    check_prefs(args.data_dir, want_reload=True, want_slice=False)
+    require_prefs(args.data_dir, want_reload=True, want_slice=False)
 
     # --- reload on, slice off -------------------------------------------------------------
     print("\n[A] In-place overwrite (20 -> 30 mm)")
@@ -230,7 +238,7 @@ def main():
 
     # --- reload on, slice on --------------------------------------------------------------
     pause("Preferences: ENABLE '%s'.\nThen select the Prepare tab (not Preview)." % PREF_SLICE_LABEL)
-    check_prefs(args.data_dir, want_reload=True, want_slice=True)
+    require_prefs(args.data_dir, want_reload=True, want_slice=True)
     print("\n[D] In-place overwrite with auto-slice on (50 -> 25 mm)")
     tail.mark(); time.sleep(1.5)
     write_cube_stl(stl, 25)
@@ -271,7 +279,7 @@ def main():
 
     # --- reload off -----------------------------------------------------------------------
     pause("Preferences: DISABLE '%s' (leave the slice option as it is)." % PREF_RELOAD_LABEL)
-    check_prefs(args.data_dir, want_reload=False, want_slice=True)
+    require_prefs(args.data_dir, want_reload=False, want_slice=True)
     print("\n[E] In-place overwrite with auto-reload off (pillars -> 35 mm cube)")
     tail.mark(); time.sleep(1.5)
     write_cube_stl(stl, 35)
