@@ -149,9 +149,13 @@ void SourceFileWatcher::on_timer(wxTimerEvent&)
     if (changed.empty() || !m_on_changed)
         return;
 
+    std::set<std::string> changed_files;
+    for (const auto& [file, stamp] : changed)
+        changed_files.insert(file);
+
     m_reload_in_progress = true;
     struct ScopeGuard { bool& flag; ~ScopeGuard() { flag = false; } } guard{m_reload_in_progress};
-    if (m_on_changed())
+    if (m_on_changed(changed_files))
         commit_source_stamps(changed);
     else
         record_failed_attempt(changed);

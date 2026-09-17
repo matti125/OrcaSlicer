@@ -6805,7 +6805,7 @@ struct Plater::priv
     SourceFileWatcher           source_file_watcher;
 
     void update_source_file_watches();
-    bool on_source_files_changed();
+    bool on_source_files_changed(const std::set<std::string>& changed_files);
     void maybe_auto_slice_after_reload();
 
     std::string                 label_btn_export;
@@ -7095,6 +7095,10 @@ struct Plater::priv
     void replace_with_stl();
     void replace_all_with_stl();
     bool reload_all_from_disk(bool interactive = true);
+    // Reloads only the ModelVolumes whose resolved source path is in changed_files, instead of
+    // reload_all_from_disk()'s select-everything: the watcher knows exactly which files changed,
+    // so there's no reason to re-import every other object's unrelated source on every event.
+    bool reload_source_files(const std::set<std::string>& changed_files, bool interactive = true);
 
     //BBS: add no_slice option
     void set_current_panel(wxPanel* panel, bool no_slice = true);
@@ -7466,7 +7470,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             evt.Skip();
         }
     });
-    this->source_file_watcher.set_on_changed([this]() { return this->on_source_files_changed(); });
+    this->source_file_watcher.set_on_changed([this](const std::set<std::string>& changed_files) { return this->on_source_files_changed(changed_files); });
 
     update();
 
@@ -10108,11 +10112,11 @@ void Plater::priv::update_source_file_watches()
 // value tells the watcher whether to commit the change's stamp to its baseline (see
 // SourceFileWatcher::set_on_changed()) -- a failed/partial reload is retried instead of silently
 // accepted.
-bool Plater::priv::on_source_files_changed()
+bool Plater::priv::on_source_files_changed(const std::set<std::string>& changed_files)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": source file(s) changed on disk, reloading";
     // Unattended: no dialogs should appear for a background reload nobody is watching for.
-    bool ok = this->q->reload_all_from_disk(false);
+    bool ok = this->reload_source_files(changed_files, false);
     // A rename-into-place leaves any file-level watch bound to the old inode, and the set of
     // paths is unchanged so the regular refresh would skip re-arming it.
     this->source_file_watcher.forget_watched_files();
@@ -11879,6 +11883,45 @@ bool Plater::priv::reload_all_from_disk(bool interactive)
     // reload from disk uses selection
     select_all();
     bool ok = reload_from_disk(interactive);
+    // restore previous selection
+    selection.clear();
+    for (unsigned int idx : curr_idxs) {
+        selection.add(idx, false);
+    }
+    return ok;
+}
+
+bool Plater::priv::reload_source_files(const std::set<std::string>& changed_files, bool interactive)
+{
+    if (changed_files.empty())
+        return true;
+
+    Selection& selection = get_selection();
+    Selection::IndicesList curr_idxs = selection.get_volume_idxs();
+
+    // reload_from_disk() operates on the current selection, same as reload_all_from_disk(); build
+    // one covering exactly the volumes whose resolved source is one of changed_files instead of
+    // select_all()'s everything. Any one instance's GLVolume is enough to select a volume:
+    // reload_from_disk() edits the shared ModelObject/ModelVolume directly, so it applies across
+    // every instance regardless of which one's GLVolume triggered the selection.
+    selection.clear();
+    bool any_selected = false;
+    for (unsigned int obj_idx = 0; obj_idx < model.objects.size(); ++obj_idx) {
+        const ModelObject* object = model.objects[obj_idx];
+        for (unsigned int vol_idx = 0; vol_idx < object->volumes.size(); ++vol_idx) {
+            const ModelVolume* volume = object->volumes[vol_idx];
+            if (volume->source.input_file.empty())
+                continue;
+            std::string resolved = SourceFileWatcher::resolve_source_file_path(volume->source.input_file, m_project_folder);
+            if (changed_files.find(resolved) != changed_files.end()) {
+                selection.add_volume(obj_idx, vol_idx, 0, false);
+                any_selected = true;
+            }
+        }
+    }
+
+    bool ok = !any_selected || reload_from_disk(interactive);
+
     // restore previous selection
     selection.clear();
     for (unsigned int idx : curr_idxs) {
