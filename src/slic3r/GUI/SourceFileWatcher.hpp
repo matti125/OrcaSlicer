@@ -7,6 +7,7 @@
 
 #include <boost/filesystem/path.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <functional>
@@ -98,6 +99,9 @@ private:
     std::function<bool(const std::set<std::string>&)> m_on_changed;
     wxFileSystemWatcher*               m_watcher{ nullptr };
     wxTimer                            m_debounce_timer;
+    // When the current debounce coalescing window opened (on_fs_event() only); caps how long a
+    // burst of unrelated directory activity can keep pushing the check out.
+    std::chrono::steady_clock::time_point m_debounce_started_at;
     std::set<std::string>              m_watched_files;
     std::map<std::string, SourceStamp> m_stamps;        // committed baseline
     std::map<std::string, SourceStamp> m_failed_stamps; // stamp of the last failed attempt, if any

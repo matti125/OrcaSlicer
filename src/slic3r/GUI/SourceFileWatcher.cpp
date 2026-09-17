@@ -130,7 +130,15 @@ void SourceFileWatcher::forget_watched_files()
 void SourceFileWatcher::on_fs_event(wxFileSystemWatcherEvent&)
 {
     // Any event in a watched directory just wakes the debounced check below; see the comment in
-    // set_watched_files() for why we don't try to match the event's reported path.
+    // set_watched_files() for why we don't try to match the event's reported path. Coalesce a
+    // burst of events into one 500ms quiet window, but cap the total delay: in a directory with
+    // unrelated activity more frequent than that (a sync client, a build directory), restarting
+    // the timer on every event would starve it forever and the reload would never fire.
+    const auto now = std::chrono::steady_clock::now();
+    if (!m_debounce_timer.IsRunning())
+        m_debounce_started_at = now;
+    else if (now - m_debounce_started_at >= std::chrono::milliseconds(2000))
+        return; // cap reached: let the already-pending timer fire instead of pushing it out further
     m_debounce_timer.Start(500, wxTIMER_ONE_SHOT);
 }
 
