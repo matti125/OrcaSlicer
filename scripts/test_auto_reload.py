@@ -18,12 +18,18 @@ import glob
 import json
 import os
 import platform
+import re
 import sys
 import time
 
 RELOAD_MARK      = "source file(s) changed on disk, reloading"
 SLICE_START_MARK = "will start print::process"
 SLICE_DONE_MARK  = "on_process_completed:finished"
+MISSING_SOURCE_MARK = "source file missing, skipping reload"
+# Logged once per reload_from_disk() call with the number of volumes it's about to reload --
+# the targeted-reload path (only the volumes whose source actually changed) should log 1 here
+# even when other objects are loaded, not the total volume count on the plate.
+RELOADABLE_COUNT_RE = re.compile(r"reloadable volumes number is: (\d+)")
 
 PREF_RELOAD = "auto_reload_on_source_change"
 PREF_SLICE  = "auto_slice_after_reload"
@@ -101,6 +107,12 @@ class LogTail:
     def has_seen(self, marker):
         self._read()
         return marker in self.buf
+
+    def last_match(self, pattern):
+        """Returns the last regex match's group(1) seen so far, or None."""
+        self._read()
+        matches = pattern.findall(self.buf)
+        return matches[-1] if matches else None
 
 
 BOX_FACES = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
@@ -204,6 +216,12 @@ def main():
     os.makedirs(work_dir, exist_ok=True)
     stl = os.path.join(work_dir, "cube.stl")
     write_cube_stl(stl, 20)
+    # Two extra objects for phase G (targeted reload alongside a missing source); written now so
+    # the file list printed below is complete, imported later once phase G is reached.
+    stl_g_changed = os.path.join(work_dir, "second_a.stl")
+    stl_g_missing = os.path.join(work_dir, "second_b.stl")
+    write_cube_stl(stl_g_changed, 10)
+    write_cube_stl(stl_g_missing, 8)
     results = []
 
     def record(name, ok, detail=""):
@@ -287,6 +305,26 @@ def main():
                 record("F5 restarted slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 6))
             record("F6 final geometry is the second change", ask("  Are the pillars %g mm tall (not %g)?" % (h2, h1)))
 
+    print("\n[G] Two more objects: one's source changes, the other's vanishes")
+    pause("Import both %s and %s as two NEW, separate objects (in addition to the existing one)."
+          % (stl_g_changed, stl_g_missing))
+    tail.mark(); time.sleep(1.5)
+    write_cube_stl(stl_g_changed, 16)
+    os.remove(stl_g_missing)
+    ok = tail.wait_for(RELOAD_MARK, args.timeout)
+    record("G1 reload after the change", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
+    if ok:
+        count = tail.last_match(RELOADABLE_COUNT_RE)
+        record("G2 only the changed volume was selected for reload", count == "1",
+               "reloadable volumes number is: %s (expected 1 -- reload is not targeted)" % count)
+        no_missing_warning = not tail.has_seen(MISSING_SOURCE_MARK)
+        record("G3 missing object's volume was never selected in the first place", no_missing_warning,
+               "" if no_missing_warning else "reload_from_disk() logged a missing-source warning for it")
+        record("G4 no dialog appeared for the missing source", ask("  No error/warning dialog popped up?"))
+        record("G5 only the changed object updated",
+               ask("  Did only the second object grow to 16 mm, with the missing-source object and the "
+                   "first object both left exactly as they were?"))
+
     # --- reload off -----------------------------------------------------------------------
     pause("Preferences: DISABLE '%s' (leave the slice option as it is)." % PREF_RELOAD_LABEL)
     require_prefs(args.data_dir, want_reload=False, want_slice=True)
@@ -307,6 +345,9 @@ def main():
         print("Test files left in %s; log at %s" % (work_dir, log_path))
         sys.exit(1)
     os.remove(stl)
+    os.remove(stl_g_changed)
+    if os.path.exists(stl_g_missing):  # phase G deletes this one
+        os.remove(stl_g_missing)
     try:
         os.rmdir(work_dir)  # only if nothing else is in it
     except OSError:
