@@ -16,6 +16,17 @@
 
 namespace Slic3r { namespace GUI {
 
+// A tracked file's on-disk identity: mtime alone is whole-second resolution, so a second write
+// landing in the same wall-clock second as a first would otherwise be invisible.
+struct SourceStamp
+{
+    std::time_t    mtime{ 0 };
+    std::uintmax_t size{ 0 };
+
+    bool operator==(const SourceStamp& other) const { return mtime == other.mtime && size == other.size; }
+    bool operator!=(const SourceStamp& other) const { return !(*this == other); }
+};
+
 // Watches the on-disk source files referenced by the loaded model and notifies its owner once a
 // tracked file's content has actually changed. Self-contained and reusable: it knows nothing
 // about Model/ModelVolume, Plater, or what "reload" means -- the caller supplies the set of
@@ -25,7 +36,7 @@ namespace Slic3r { namespace GUI {
 // place (only visible as a directory-listing change), while an in-place overwrite produces no
 // directory event at all and needs a watch on the file itself. The event handler doesn't try to
 // match the reported path -- macOS's kqueue backend can report a rename with just the directory
-// and no filename -- it only wakes a debounced mtime comparison against the baseline recorded in
+// and no filename -- it only wakes a debounced stamp comparison against the baseline recorded in
 // set_watched_files(). Per-file watches are skipped on Windows: wx's MSW backend rejects them
 // with an error dialog, and its ReadDirectoryChangesW directory watch already reports in-place
 // writes.
@@ -45,34 +56,51 @@ public:
     SourceFileWatcher(const SourceFileWatcher&) = delete;
     SourceFileWatcher& operator=(const SourceFileWatcher&) = delete;
 
-    // Invoked (after the debounce delay) once a watched file's mtime is confirmed changed.
-    void set_on_changed(std::function<void()> on_changed) { m_on_changed = std::move(on_changed); }
+    // Invoked (after the debounce delay) once a watched file's stamp is confirmed changed. Must
+    // return whether the caller's reload actually succeeded: the changed files' stamps are only
+    // committed to the baseline on true, so a failed/partial reload (a file still being written,
+    // locked, or one this build can't parse) is retried instead of silently accepted.
+    void set_on_changed(std::function<bool()> on_changed) { m_on_changed = std::move(on_changed); }
 
     // Replaces the set of watched files (already resolved to their on-disk paths) and rearms the
-    // underlying watches. No-op if the set is unchanged from the last call.
+    // underlying OS-level watches. Always rearms (needed after forget_watched_files(), even when
+    // the path set itself is unchanged); the stamp baseline is left untouched for files that stay
+    // tracked, and seeded fresh only for newly-added ones, so a rearm never erases a pending,
+    // not-yet-committed change. No-op if the path set is unchanged and nothing was forgotten.
     void set_watched_files(std::set<std::string> resolved_paths);
 
     // Drops all watches and the tracked baseline, e.g. when the feature is turned off.
     void clear();
 
-    // Forgets which files are currently watched (without touching the on/off state) so the next
-    // call to set_watched_files() re-arms from scratch, even if the resolved path set itself is
-    // unchanged. A rename-into-place leaves a file-level watch bound to the old inode, so the
-    // set of paths looking the same does not mean the watch is still live.
+    // Forgets which files are currently watched (without touching the stamp baseline or the
+    // on/off state) so the next call to set_watched_files() re-arms the OS-level watch from
+    // scratch, even if the resolved path set itself is unchanged. A rename-into-place leaves a
+    // file-level watch bound to the old inode, so the set of paths looking the same does not mean
+    // the watch is still live.
     void forget_watched_files();
 
 private:
     void on_fs_event(wxFileSystemWatcherEvent& evt);
     void on_timer(wxTimerEvent& evt);
-    // Compares the current mtime of every tracked file against the stored baseline, updating the
-    // baseline as it goes. Returns true if any file's mtime changed since the last check.
-    bool files_changed_on_disk();
 
-    std::function<void()>              m_on_changed;
+    // Returns the tracked files whose stamp differs from the committed baseline, without
+    // mutating anything -- a vanished file (mtime reads as missing) is skipped rather than
+    // reported, and a file stuck at the exact stamp of its last failed attempt is skipped too,
+    // so a permanently unloadable file doesn't retry on every subsequent event.
+    std::map<std::string, SourceStamp> changed_source_files() const;
+    // Advances the baseline to the given stamps (a successful reload) and clears any recorded
+    // failure for them.
+    void commit_source_stamps(const std::map<std::string, SourceStamp>& stamps);
+    // Records a failed attempt at the given stamps and arms one bonus retry, for the transient
+    // case of a file still being written or briefly locked.
+    void record_failed_attempt(const std::map<std::string, SourceStamp>& stamps);
+
+    std::function<bool()>              m_on_changed;
     wxFileSystemWatcher*               m_watcher{ nullptr };
     wxTimer                            m_debounce_timer;
     std::set<std::string>              m_watched_files;
-    std::map<std::string, std::time_t> m_mtimes;
+    std::map<std::string, SourceStamp> m_stamps;        // committed baseline
+    std::map<std::string, SourceStamp> m_failed_stamps; // stamp of the last failed attempt, if any
     // Guards m_on_changed() against re-entry from a nested event loop pumped during the reload
     // it triggers (a modal dialog, wxBusyInfo) while this timer is re-armed by another fs event.
     bool                                m_reload_in_progress{ false };

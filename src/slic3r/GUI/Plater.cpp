@@ -6805,7 +6805,7 @@ struct Plater::priv
     SourceFileWatcher           source_file_watcher;
 
     void update_source_file_watches();
-    void on_source_files_changed();
+    bool on_source_files_changed();
     void maybe_auto_slice_after_reload();
 
     std::string                 label_btn_export;
@@ -7466,7 +7466,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             evt.Skip();
         }
     });
-    this->source_file_watcher.set_on_changed([this]() { this->on_source_files_changed(); });
+    this->source_file_watcher.set_on_changed([this]() { return this->on_source_files_changed(); });
 
     update();
 
@@ -10104,17 +10104,21 @@ void Plater::priv::update_source_file_watches()
     source_file_watcher.set_watched_files(std::move(current_files));
 }
 
-// Called once the watcher confirms a tracked source file actually changed on disk.
-void Plater::priv::on_source_files_changed()
+// Called once the watcher confirms a tracked source file actually changed on disk. The return
+// value tells the watcher whether to commit the change's stamp to its baseline (see
+// SourceFileWatcher::set_on_changed()) -- a failed/partial reload is retried instead of silently
+// accepted.
+bool Plater::priv::on_source_files_changed()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": source file(s) changed on disk, reloading";
     // Unattended: no dialogs should appear for a background reload nobody is watching for.
-    this->q->reload_all_from_disk(false);
+    bool ok = this->q->reload_all_from_disk(false);
     // A rename-into-place leaves any file-level watch bound to the old inode, and the set of
     // paths is unchanged so the regular refresh would skip re-arming it.
     this->source_file_watcher.forget_watched_files();
     this->update_source_file_watches();
     this->maybe_auto_slice_after_reload();
+    return ok;
 }
 
 // Distinct from "Auto slice after changes" (auto_slice_after_change), which only reacts to

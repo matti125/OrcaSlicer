@@ -11,15 +11,18 @@ namespace {
     // Sentinel for "file does not currently exist" so a create is detected as a change too.
     constexpr std::time_t source_file_missing_mtime = 0;
 
-    std::time_t get_source_file_mtime(const std::string& path)
+    SourceStamp get_source_stamp(const std::string& path)
     {
         boost::system::error_code ec;
         std::time_t mtime = fs::last_write_time(path, ec);
-        return ec ? source_file_missing_mtime : mtime;
+        if (ec)
+            return SourceStamp{source_file_missing_mtime, 0};
+        std::uintmax_t size = fs::file_size(path, ec);
+        return ec ? SourceStamp{source_file_missing_mtime, 0} : SourceStamp{mtime, size};
     }
 
     // fs::exists()/fs::is_directory() throw on an I/O error (e.g. an unreachable network share);
-    // these treat that the same as "not found" instead, matching get_source_file_mtime() above.
+    // these treat that the same as "not found" instead, matching get_source_stamp() above.
     bool path_exists(const fs::path& path)
     {
         boost::system::error_code ec;
@@ -74,19 +77,24 @@ void SourceFileWatcher::set_watched_files(std::set<std::string> resolved_paths)
     }
 
     m_watcher->RemoveAll();
-    m_watched_files = std::move(resolved_paths);
 
-    // Record a baseline mtime for each tracked file so the debounced check can tell whether it
-    // actually changed, rather than relying on the watcher event to name the file: directory-level
-    // backends (e.g. macOS's kqueue-based one) can report a rename-into-place with just the
-    // containing directory and no filename at all, which a path-matching approach would miss.
-    std::map<std::string, std::time_t> new_mtimes;
+    // Drop stamps (baseline and failed-attempt) for files no longer tracked; keep them for files
+    // that stay tracked so a rearm (e.g. after forget_watched_files()) doesn't erase a pending,
+    // not-yet-committed change.
+    for (auto it = m_stamps.begin(); it != m_stamps.end(); )
+        it = resolved_paths.count(it->first) ? std::next(it) : m_stamps.erase(it);
+    for (auto it = m_failed_stamps.begin(); it != m_failed_stamps.end(); )
+        it = resolved_paths.count(it->first) ? std::next(it) : m_failed_stamps.erase(it);
+
+    // Seed a baseline for newly tracked files only.
     std::set<std::string> watched_dirs;
-    for (const std::string& file : m_watched_files) {
-        new_mtimes[file] = get_source_file_mtime(file);
+    for (const std::string& file : resolved_paths) {
+        if (m_stamps.find(file) == m_stamps.end())
+            m_stamps[file] = get_source_stamp(file);
         watched_dirs.insert(fs::path(file).parent_path().string());
     }
-    m_mtimes = std::move(new_mtimes);
+
+    m_watched_files = std::move(resolved_paths);
 
     for (const std::string& dir : watched_dirs) {
         if (!dir.empty() && is_directory(dir))
@@ -110,7 +118,8 @@ void SourceFileWatcher::clear()
     if (m_watcher != nullptr)
         m_watcher->RemoveAll();
     m_watched_files.clear();
-    m_mtimes.clear();
+    m_stamps.clear();
+    m_failed_stamps.clear();
 }
 
 void SourceFileWatcher::forget_watched_files()
@@ -135,29 +144,56 @@ void SourceFileWatcher::on_timer(wxTimerEvent&)
         m_debounce_timer.Start(500, wxTIMER_ONE_SHOT);
         return;
     }
-    if (files_changed_on_disk() && m_on_changed) {
-        m_reload_in_progress = true;
-        struct ScopeGuard { bool& flag; ~ScopeGuard() { flag = false; } } guard{m_reload_in_progress};
-        m_on_changed();
+
+    std::map<std::string, SourceStamp> changed = changed_source_files();
+    if (changed.empty() || !m_on_changed)
+        return;
+
+    m_reload_in_progress = true;
+    struct ScopeGuard { bool& flag; ~ScopeGuard() { flag = false; } } guard{m_reload_in_progress};
+    if (m_on_changed())
+        commit_source_stamps(changed);
+    else
+        record_failed_attempt(changed);
+}
+
+std::map<std::string, SourceStamp> SourceFileWatcher::changed_source_files() const
+{
+    std::map<std::string, SourceStamp> changed;
+    for (const auto& [file, baseline] : m_stamps) {
+        SourceStamp current = get_source_stamp(file);
+        if (current.mtime == source_file_missing_mtime)
+            // Vanished rather than changed -- e.g. a rename-into-place caught mid-flight, or a
+            // volume unmounted. Wait for the file to come back instead of treating the
+            // disappearance itself as a change to reload.
+            continue;
+        if (current == baseline)
+            continue;
+        auto failed_it = m_failed_stamps.find(file);
+        if (failed_it != m_failed_stamps.end() && failed_it->second == current)
+            // Already tried and failed at exactly this stamp; wait for it to change again rather
+            // than retrying a permanently unloadable file on every subsequent event.
+            continue;
+        changed[file] = current;
+    }
+    return changed;
+}
+
+void SourceFileWatcher::commit_source_stamps(const std::map<std::string, SourceStamp>& stamps)
+{
+    for (const auto& [file, stamp] : stamps) {
+        m_stamps[file] = stamp;
+        m_failed_stamps.erase(file);
     }
 }
 
-bool SourceFileWatcher::files_changed_on_disk()
+void SourceFileWatcher::record_failed_attempt(const std::map<std::string, SourceStamp>& stamps)
 {
-    bool changed = false;
-    for (auto& [file, mtime] : m_mtimes) {
-        std::time_t current = get_source_file_mtime(file);
-        if (current == source_file_missing_mtime)
-            // Vanished rather than changed -- e.g. a rename-into-place caught mid-flight, or a
-            // volume unmounted. Keep the last-known baseline and wait for the file to come back
-            // instead of treating the disappearance itself as a change to reload.
-            continue;
-        if (current != mtime) {
-            mtime = current;
-            changed = true;
-        }
-    }
-    return changed;
+    for (const auto& [file, stamp] : stamps)
+        m_failed_stamps[file] = stamp;
+    // One bonus retry: a file still being written or briefly locked (e.g. on Windows) may have
+    // settled by then. The failed-stamp record above keeps this from looping if it hasn't.
+    m_debounce_timer.Start(1500, wxTIMER_ONE_SHOT);
 }
 
 }} // namespace Slic3r::GUI
