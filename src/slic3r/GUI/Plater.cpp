@@ -7090,11 +7090,11 @@ struct Plater::priv
     void export_gcode(fs::path output_path, bool output_path_on_removable_media);
     void export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job);
 
-    void reload_from_disk();
+    bool reload_from_disk(bool interactive = true);
     bool replace_volume_with_stl(int object_idx, int volume_idx, const fs::path& new_path, const std::string& snapshot = "");
     void replace_with_stl();
     void replace_all_with_stl();
-    void reload_all_from_disk();
+    bool reload_all_from_disk(bool interactive = true);
 
     //BBS: add no_slice option
     void set_current_panel(wxPanel* panel, bool no_slice = true);
@@ -10108,7 +10108,8 @@ void Plater::priv::update_source_file_watches()
 void Plater::priv::on_source_files_changed()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": source file(s) changed on disk, reloading";
-    this->q->reload_all_from_disk();
+    // Unattended: no dialogs should appear for a background reload nobody is watching for.
+    this->q->reload_all_from_disk(false);
     // A rename-into-place leaves any file-level watch bound to the old inode, and the set of
     // paths is unchanged so the regular refresh would skip re-arming it.
     this->source_file_watcher.forget_watched_files();
@@ -11383,15 +11384,16 @@ static std::vector<std::pair<int, int>> reloadable_volumes(const Model &model, c
 }
 #endif // ENABLE_RELOAD_FROM_DISK_REWORK
 
-void Plater::priv::reload_from_disk()
+bool Plater::priv::reload_from_disk(bool interactive)
 {
+    bool ok = true;
 #if ENABLE_RELOAD_FROM_DISK_REWORK
     // collect selected reloadable ModelVolumes
     std::vector<std::pair<int, int>> selected_volumes = reloadable_volumes(model, get_selection());
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " entry, and reloadable volumes number is: " << selected_volumes.size();
     // nothing to reload, return
     if (selected_volumes.empty())
-        return;
+        return true;
 
     std::sort(selected_volumes.begin(), selected_volumes.end(), [](const std::pair<int, int> &v1, const std::pair<int, int> &v2) {
         return (v1.first < v2.first) || (v1.first == v2.first && v1.second < v2.second);
@@ -11405,7 +11407,7 @@ void Plater::priv::reload_from_disk()
     const Selection& selection = get_selection();
 
     if (selection.is_wipe_tower())
-        return;
+        return true;
 
     // struct to hold selected ModelVolumes by their indices
     struct SelectedVolume
@@ -11496,50 +11498,60 @@ void Plater::priv::reload_from_disk()
     std::sort(missing_input_paths.begin(), missing_input_paths.end());
     missing_input_paths.erase(std::unique(missing_input_paths.begin(), missing_input_paths.end()), missing_input_paths.end());
 
-    while (!missing_input_paths.empty()) {
-        // ask user to select the missing file
-        fs::path search = missing_input_paths.back();
-        wxString title = _L("Please select a file");
+    if (interactive) {
+        while (!missing_input_paths.empty()) {
+            // ask user to select the missing file
+            fs::path search = missing_input_paths.back();
+            wxString title = _L("Please select a file");
 #if defined(__APPLE__)
-        title += " (" + from_u8(search.filename().string()) + ")";
+            title += " (" + from_u8(search.filename().string()) + ")";
 #endif // __APPLE__
-        title += ":";
-        wxFileDialog dialog(q, title, "", from_u8(search.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-        if (dialog.ShowModal() != wxID_OK)
-            return;
+            title += ":";
+            wxFileDialog dialog(q, title, "", from_u8(search.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+            if (dialog.ShowModal() != wxID_OK)
+                return false;
 
-        std::string sel_filename_path = dialog.GetPath().ToUTF8().data();
-        std::string sel_filename = fs::path(sel_filename_path).filename().string();
-        if (boost::algorithm::iequals(search.filename().string(), sel_filename)) {
-            input_paths.push_back(sel_filename_path);
-            missing_input_paths.pop_back();
+            std::string sel_filename_path = dialog.GetPath().ToUTF8().data();
+            std::string sel_filename = fs::path(sel_filename_path).filename().string();
+            if (boost::algorithm::iequals(search.filename().string(), sel_filename)) {
+                input_paths.push_back(sel_filename_path);
+                missing_input_paths.pop_back();
 
-            fs::path sel_path = fs::path(sel_filename_path).remove_filename().string();
+                fs::path sel_path = fs::path(sel_filename_path).remove_filename().string();
 
-            std::vector<fs::path>::iterator it = missing_input_paths.begin();
-            while (it != missing_input_paths.end()) {
-                // try to use the path of the selected file with all remaining missing files
-                fs::path repathed_filename = sel_path;
-                repathed_filename /= it->filename();
-                if (fs::exists(repathed_filename)) {
-                    input_paths.push_back(repathed_filename.string());
-                    it = missing_input_paths.erase(it);
+                std::vector<fs::path>::iterator it = missing_input_paths.begin();
+                while (it != missing_input_paths.end()) {
+                    // try to use the path of the selected file with all remaining missing files
+                    fs::path repathed_filename = sel_path;
+                    repathed_filename /= it->filename();
+                    if (fs::exists(repathed_filename)) {
+                        input_paths.push_back(repathed_filename.string());
+                        it = missing_input_paths.erase(it);
+                    }
+                    else
+                        ++it;
                 }
-                else
-                    ++it;
+            }
+            else {
+                wxString      message = _L("Do you want to replace it") + " ?";
+                MessageDialog dlg(q, message, _L("Message"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
+                if (dlg.ShowModal() == wxID_YES)
+#if ENABLE_RELOAD_FROM_DISK_REWORK
+                    replace_paths.emplace_back(search, sel_filename_path);
+#else
+                    replace_paths.emplace_back(sel_filename_path);
+#endif // ENABLE_RELOAD_FROM_DISK_REWORK
+                missing_input_paths.pop_back();
             }
         }
-        else {
-            wxString      message = _L("Do you want to replace it") + " ?";
-            MessageDialog dlg(q, message, _L("Message"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
-            if (dlg.ShowModal() == wxID_YES)
-#if ENABLE_RELOAD_FROM_DISK_REWORK
-                replace_paths.emplace_back(search, sel_filename_path);
-#else
-                replace_paths.emplace_back(sel_filename_path);
-#endif // ENABLE_RELOAD_FROM_DISK_REWORK
-            missing_input_paths.pop_back();
+    } else {
+        // Unattended reload (the auto-reload watcher): don't prompt for a missing source, just
+        // leave the volumes that reference it untouched and report the reload as incomplete.
+        for (const fs::path& missing : missing_input_paths) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": source file missing, skipping reload: " << missing.string();
+            ok = false;
         }
+        missing_input_paths.clear();
     }
 
     std::sort(input_paths.begin(), input_paths.end());
@@ -11557,8 +11569,14 @@ void Plater::priv::reload_from_disk()
     // load one file at a time
     for (size_t i = 0; i < input_paths.size(); ++i) {
         const auto& path = input_paths[i].string();
-        auto        obj_color_fun = [&path](ObjDialogInOut &in_out) {
+        auto        obj_color_fun = [&path, interactive](ObjDialogInOut &in_out) {
             if (!boost::iends_with(path, ".obj")) { return; }
+            if (!interactive) {
+                // Mirror the dialog's cancel path: leave colours as they are rather than
+                // reassigning them without anyone at the keyboard to choose.
+                in_out.filament_ids.clear();
+                return;
+            }
             const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config();
             ObjColorDialog                 color_dlg(nullptr, in_out, extruder_colours, Sidebar::should_show_SEMM_buttons());
             if (color_dlg.ShowModal() != wxID_OK) {
@@ -11606,7 +11624,7 @@ void Plater::priv::reload_from_disk()
         catch (std::exception&)
         {
             // error while loading
-            return;
+            return false;
         }
 
 #if ENABLE_RELOAD_FROM_DISK_REWORK
@@ -11818,12 +11836,18 @@ void Plater::priv::reload_from_disk()
 #endif // ENABLE_RELOAD_FROM_DISK_REWORK
 
     if (!fail_list.empty()) {
-        wxString message = _L("Unable to reload:") + "\n";
-        for (const wxString& s : fail_list) {
-            message += s + "\n";
+        ok = false;
+        if (interactive) {
+            wxString message = _L("Unable to reload:") + "\n";
+            for (const wxString& s : fail_list) {
+                message += s + "\n";
+            }
+            MessageDialog dlg(q, message, _L("Error during reload"), wxOK | wxOK_DEFAULT | wxICON_WARNING);
+            dlg.ShowModal();
+        } else {
+            for (const wxString& s : fail_list)
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": unable to reload: " << s.ToUTF8().data();
         }
-        MessageDialog dlg(q, message, _L("Error during reload"), wxOK | wxOK_DEFAULT | wxICON_WARNING);
-        dlg.ShowModal();
     }
 
     // update 3D scene
@@ -11835,12 +11859,13 @@ void Plater::priv::reload_from_disk()
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " finish.";
+    return ok;
 }
 
-void Plater::priv::reload_all_from_disk()
+bool Plater::priv::reload_all_from_disk(bool interactive)
 {
     if (model.objects.empty())
-        return;
+        return true;
 
     Plater::TakeSnapshot snapshot(q, _u8L("Reload all"));
     Plater::SuppressSnapshots suppress(q);
@@ -11849,12 +11874,13 @@ void Plater::priv::reload_all_from_disk()
     Selection::IndicesList curr_idxs = selection.get_volume_idxs();
     // reload from disk uses selection
     select_all();
-    reload_from_disk();
+    bool ok = reload_from_disk(interactive);
     // restore previous selection
     selection.clear();
     for (unsigned int idx : curr_idxs) {
         selection.add(idx, false);
     }
+    return ok;
 }
 
 //BBS: add no_slice logic
@@ -19254,9 +19280,9 @@ void Plater::publish_project()
 }
 
 
-void Plater::reload_from_disk()
+bool Plater::reload_from_disk(bool interactive)
 {
-    p->reload_from_disk();
+    return p->reload_from_disk(interactive);
 }
 
 void Plater::replace_with_stl()
@@ -19269,9 +19295,9 @@ void Plater::replace_all_with_stl()
     p->replace_all_with_stl();
 }
 
-void Plater::reload_all_from_disk()
+bool Plater::reload_all_from_disk(bool interactive)
 {
-    p->reload_all_from_disk();
+    return p->reload_all_from_disk(interactive);
 }
 
 bool Plater::has_toolpaths_to_export() const

@@ -128,8 +128,18 @@ void SourceFileWatcher::on_fs_event(wxFileSystemWatcherEvent&)
 void SourceFileWatcher::on_timer(wxTimerEvent&)
 {
     m_debounce_timer.Stop();
-    if (files_changed_on_disk() && m_on_changed)
+    if (m_reload_in_progress) {
+        // The callback below can pump the event loop (a modal dialog, wxBusyInfo) and let this
+        // timer fire again while the first reload is still on the stack. Postpone instead of
+        // re-entering it: the caller's model/selection state isn't valid to touch twice at once.
+        m_debounce_timer.Start(500, wxTIMER_ONE_SHOT);
+        return;
+    }
+    if (files_changed_on_disk() && m_on_changed) {
+        m_reload_in_progress = true;
+        struct ScopeGuard { bool& flag; ~ScopeGuard() { flag = false; } } guard{m_reload_in_progress};
         m_on_changed();
+    }
 }
 
 bool SourceFileWatcher::files_changed_on_disk()
@@ -137,6 +147,11 @@ bool SourceFileWatcher::files_changed_on_disk()
     bool changed = false;
     for (auto& [file, mtime] : m_mtimes) {
         std::time_t current = get_source_file_mtime(file);
+        if (current == source_file_missing_mtime)
+            // Vanished rather than changed -- e.g. a rename-into-place caught mid-flight, or a
+            // volume unmounted. Keep the last-known baseline and wait for the file to come back
+            // instead of treating the disappearance itself as a change to reload.
+            continue;
         if (current != mtime) {
             mtime = current;
             changed = true;

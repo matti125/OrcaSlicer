@@ -73,6 +73,9 @@ private:
     wxTimer                            m_debounce_timer;
     std::set<std::string>              m_watched_files;
     std::map<std::string, std::time_t> m_mtimes;
+    // Guards m_on_changed() against re-entry from a nested event loop pumped during the reload
+    // it triggers (a modal dialog, wxBusyInfo) while this timer is re-armed by another fs event.
+    bool                                m_reload_in_progress{ false };
 };
 
 }} // namespace Slic3r::GUI
