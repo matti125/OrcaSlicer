@@ -6749,7 +6749,10 @@ struct Plater::priv
     std::string m_broken_shown_sig;
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
-    bool slice_after_reload_pending {false};
+    // Plates still queued for the current auto-slice-after-reload sequence, and the plate to
+    // return to once it drains (-1 when no sequence is in flight). See maybe_auto_slice_after_reload().
+    std::vector<int> plates_pending_slice_after_reload;
+    int plate_to_restore_after_reload {-1};
     // Consumed once by on_action_slice_plate(), which otherwise unconditionally calls
     // select_view_3D("Preview") on every EVT_GLTOOLBAR_SLICE_PLATE regardless of who posted it --
     // a separate mechanism from m_tabpanel's page selection, and one MainFrame can't reach
@@ -6806,7 +6809,7 @@ struct Plater::priv
 
     void update_source_file_watches();
     bool on_source_files_changed(const std::set<std::string>& changed_files);
-    void maybe_auto_slice_after_reload();
+    void maybe_auto_slice_after_reload(const std::set<int>& touched_objects);
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -7098,7 +7101,8 @@ struct Plater::priv
     // Reloads only the ModelVolumes whose resolved source path is in changed_files, instead of
     // reload_all_from_disk()'s select-everything: the watcher knows exactly which files changed,
     // so there's no reason to re-import every other object's unrelated source on every event.
-    bool reload_source_files(const std::set<std::string>& changed_files, bool interactive = true);
+    // touched_objects, if given, collects the object indices that were actually reloaded.
+    bool reload_source_files(const std::set<std::string>& changed_files, bool interactive = true, std::set<int>* touched_objects = nullptr);
 
     //BBS: add no_slice option
     void set_current_panel(wxPanel* panel, bool no_slice = true);
@@ -10116,12 +10120,13 @@ bool Plater::priv::on_source_files_changed(const std::set<std::string>& changed_
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": source file(s) changed on disk, reloading";
     // Unattended: no dialogs should appear for a background reload nobody is watching for.
-    bool ok = this->reload_source_files(changed_files, false);
+    std::set<int> touched_objects;
+    bool ok = this->reload_source_files(changed_files, false, &touched_objects);
     // A rename-into-place leaves any file-level watch bound to the old inode, and the set of
     // paths is unchanged so the regular refresh would skip re-arming it.
     this->source_file_watcher.forget_watched_files();
     this->update_source_file_watches();
-    this->maybe_auto_slice_after_reload();
+    this->maybe_auto_slice_after_reload(touched_objects);
     return ok;
 }
 
@@ -10131,17 +10136,42 @@ bool Plater::priv::on_source_files_changed(const std::set<std::string>& changed_
 // configured. This is the model-change counterpart, scoped specifically to the watcher's own
 // reload rather than to reload_all_from_disk() in general: the manual "Reload from disk" menu
 // item has a deliberate "don't slice" contract that a global hook would silently violate.
-void Plater::priv::maybe_auto_slice_after_reload()
+//
+// Only the plate(s) that actually contain a touched object are queued -- not the plate that
+// happens to be showing (a reload can affect an off-screen plate) and not every plate on the
+// project (auto-arrange can spread one object's instances across plates, but most reloads
+// touch just one).
+void Plater::priv::maybe_auto_slice_after_reload(const std::set<int>& touched_objects)
 {
     if (!wxGetApp().app_config->get_bool("auto_slice_after_reload"))
         return;
 
+    std::set<int> affected_plates;
+    for (int obj_idx : touched_objects) {
+        if (obj_idx < 0 || obj_idx >= int(model.objects.size()))
+            continue;
+        int instance_count = int(model.objects[obj_idx]->instances.size());
+        for (int inst_idx = 0; inst_idx < instance_count; ++inst_idx) {
+            int plate_idx = partplate_list.find_instance(obj_idx, inst_idx);
+            if (plate_idx >= 0)
+                affected_plates.insert(plate_idx);
+        }
+    }
+    if (affected_plates.empty())
+        return;
+
+    plates_pending_slice_after_reload.assign(affected_plates.begin(), affected_plates.end());
+    if (plate_to_restore_after_reload < 0)
+        // Don't clobber this if a second reload lands while an earlier one is still slicing
+        // through its own queue -- the "current" plate at that moment may already be one this
+        // sequence jumped to, not the one the user was actually looking at.
+        plate_to_restore_after_reload = partplate_list.get_curr_plate_index();
+
     if (background_process.running() || m_is_slicing) {
-        // A previous job is still in flight. Cancel it and restart once the cancellation
-        // completes (see on_process_completed()), instead of slicing directly:
+        // A previous job is still in flight. Cancel it and start on the queued plates once the
+        // cancellation completes (see on_process_completed()), instead of slicing directly:
         // MainFrame::get_enable_slice_status() would see a slice as still "in progress" and
         // silently skip this request, leaving the freshly reloaded geometry unsliced.
-        slice_after_reload_pending = true;
         background_process.stop();
     } else {
         slice_after_reload();
@@ -11891,7 +11921,7 @@ bool Plater::priv::reload_all_from_disk(bool interactive)
     return ok;
 }
 
-bool Plater::priv::reload_source_files(const std::set<std::string>& changed_files, bool interactive)
+bool Plater::priv::reload_source_files(const std::set<std::string>& changed_files, bool interactive, std::set<int>* touched_objects)
 {
     if (changed_files.empty())
         return true;
@@ -11916,6 +11946,8 @@ bool Plater::priv::reload_source_files(const std::set<std::string>& changed_file
             if (changed_files.find(resolved) != changed_files.end()) {
                 selection.add_volume(obj_idx, vol_idx, 0, false);
                 any_selected = true;
+                if (touched_objects)
+                    touched_objects->insert(int(obj_idx));
             }
         }
     }
@@ -12713,14 +12745,30 @@ bool Plater::priv::warnings_dialog()
 }
 
 //BBS: add project slice logic
+// Pops the next plate off plates_pending_slice_after_reload and slices it; once the queue drains,
+// returns the view to whichever plate was current before the sequence started (skipped if that's
+// already the current plate, the common single-plate case). Called directly by
+// maybe_auto_slice_after_reload() to kick the sequence off, and again from on_process_completed()
+// after each queued plate's slice completes, to step to the next one.
 void Plater::priv::slice_after_reload()
 {
+    if (plates_pending_slice_after_reload.empty()) {
+        if (plate_to_restore_after_reload >= 0 && plate_to_restore_after_reload != partplate_list.get_curr_plate_index())
+            q->select_plate(plate_to_restore_after_reload);
+        plate_to_restore_after_reload = -1;
+        return;
+    }
+
+    int plate_idx = plates_pending_slice_after_reload.front();
+    plates_pending_slice_after_reload.erase(plates_pending_slice_after_reload.begin());
+    q->select_plate(plate_idx);
+
     // reload_all_from_disk() ends with its own update() call, which only *schedules* the
     // model-changed invalidation via a 500ms debounce timer (schedule_background_process())
     // rather than applying it right away. Checking the slice-enable state immediately
     // afterward races that timer: about half the time it hasn't fired yet, so
     // is_slice_result_valid() still reads stale "already sliced" and the slice is skipped.
-    // Force the current plate's slice result invalid directly instead of waiting on it.
+    // Force this plate's slice result invalid directly instead of waiting on it.
     partplate_list.get_curr_plate()->update_slice_result_valid_state(false);
     // Stay on whatever tab is currently active rather than jumping to Preview: this is a
     // background action the user didn't just ask for, so rearranging what they're looking at
@@ -12944,8 +12992,9 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         auto_reslice_after_cancel = false;
         schedule_auto_reslice_if_needed();
     }
-    if (slice_after_reload_pending) {
-        slice_after_reload_pending = false;
+    if (!plates_pending_slice_after_reload.empty() || plate_to_restore_after_reload >= 0) {
+        // Either another queued plate needs to start, or the queue just drained and the view
+        // still needs to return to where it was; slice_after_reload() handles both.
         slice_after_reload();
     }
 
