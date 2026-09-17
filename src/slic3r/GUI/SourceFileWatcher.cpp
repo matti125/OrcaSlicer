@@ -17,16 +17,32 @@ namespace {
         std::time_t mtime = fs::last_write_time(path, ec);
         return ec ? source_file_missing_mtime : mtime;
     }
+
+    // fs::exists()/fs::is_directory() throw on an I/O error (e.g. an unreachable network share);
+    // these treat that the same as "not found" instead, matching get_source_file_mtime() above.
+    bool path_exists(const fs::path& path)
+    {
+        boost::system::error_code ec;
+        bool result = fs::exists(path, ec);
+        return !ec && result;
+    }
+
+    bool is_directory(const fs::path& path)
+    {
+        boost::system::error_code ec;
+        bool result = fs::is_directory(path, ec);
+        return !ec && result;
+    }
 }
 
 std::string SourceFileWatcher::resolve_source_file_path(const std::string& recorded_path,
                                                           const fs::path& project_folder)
 {
-    if (recorded_path.empty() || fs::exists(recorded_path))
+    if (recorded_path.empty() || path_exists(recorded_path))
         return recorded_path;
     if (!project_folder.empty()) {
         fs::path candidate = project_folder / fs::path(recorded_path).filename();
-        if (fs::exists(candidate))
+        if (path_exists(candidate))
             return candidate.string();
     }
     return recorded_path;
@@ -73,7 +89,7 @@ void SourceFileWatcher::set_watched_files(std::set<std::string> resolved_paths)
     m_mtimes = std::move(new_mtimes);
 
     for (const std::string& dir : watched_dirs) {
-        if (!dir.empty() && fs::is_directory(dir))
+        if (!dir.empty() && is_directory(dir))
             m_watcher->Add(wxFileName(dir, wxEmptyString));
     }
 
@@ -83,7 +99,7 @@ void SourceFileWatcher::set_watched_files(std::set<std::string> resolved_paths)
     // file-level watches with a wxLogError dialog, and ReadDirectoryChangesW already reports
     // in-place writes through the directory watch.
     for (const std::string& file : m_watched_files) {
-        if (fs::exists(file))
+        if (path_exists(file))
             m_watcher->Add(wxFileName(file));
     }
 #endif

@@ -230,7 +230,7 @@ def main():
     ok = tail.wait_for(RELOAD_MARK, args.timeout)
     record("A1 reload after in-place overwrite", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
     if ok:
-        record("A2 no slice when '%s' is off" % PREF_SLICE_LABEL, tail.absent_after(SLICE_START_MARK, 4))
+        record("A2 no slice when '%s' is off" % PREF_SLICE_LABEL, tail.absent_after(SLICE_START_MARK, args.quiet_window))
         record("A3 model visibly updated", ask("  Did the cube grow to 30 mm?"))
 
     print("\n[B] Rename-into-place, the temp-file-then-rename pattern most exporters use (30 -> 40 mm)")
