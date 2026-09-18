@@ -359,7 +359,8 @@ def main():
             record("F6 final geometry is the second change", ask("  Are the pillars %g mm tall (not %g)?" % (h2, h1)))
 
     print("\n[G] Two more objects: one's source changes, the other's vanishes")
-    pause("Import both %s and %s as two NEW, separate objects (in addition to the existing one)."
+    pause("Import both %s and %s as two NEW, separate objects (in addition to the existing one), "
+          "then Auto Arrange so they don't overlap it or each other."
           % (stl_g_changed, stl_g_missing))
     tail.mark(); time.sleep(1.5)
     write_cube_stl(stl_g_changed, 16)
@@ -379,7 +380,7 @@ def main():
                    % (os.path.basename(stl_g_changed), os.path.basename(stl_g_missing), os.path.basename(stl))))
 
     print("\n[H] .obj source, overwritten -- must reload with no color-import dialog")
-    pause("Import %s as a new object." % obj_path)
+    pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % obj_path)
     tail.mark(); time.sleep(1.5)
     write_obj_cube(obj_path, 22)
     ok = tail.wait_for(RELOAD_MARK, args.timeout)
@@ -389,7 +390,7 @@ def main():
         record("H3 model visibly updated", ask("  Did %s grow to 22 mm?" % os.path.basename(obj_path)))
 
     print("\n[I] Overwrite with a truncated/corrupt file, then a valid one")
-    pause("Import %s as a new object." % flaky_stl)
+    pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % flaky_stl)
     tail.mark(); time.sleep(1.5)
     write_truncated_stl(flaky_stl, 20)
     ok = tail.wait_for(RELOAD_MARK, args.timeout)
@@ -410,7 +411,7 @@ def main():
             record("I5 model visibly updated", ask("  Did %s grow to 26 mm?" % os.path.basename(flaky_stl)))
 
     print("\n[J] Two overwrites landing close together, different sizes -- both must be picked up")
-    pause("Import %s as a new object." % quick_stl)
+    pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % quick_stl)
     tail.mark(); time.sleep(1.5)
     write_cube_stl(quick_stl, 18)
     ok = tail.wait_for(RELOAD_MARK, args.timeout)
