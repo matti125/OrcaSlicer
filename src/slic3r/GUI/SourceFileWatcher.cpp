@@ -3,6 +3,8 @@
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <algorithm>
+
 namespace fs = boost::filesystem;
 
 namespace Slic3r { namespace GUI {
@@ -85,6 +87,8 @@ void SourceFileWatcher::set_watched_files(std::set<std::string> resolved_paths)
         it = resolved_paths.count(it->first) ? std::next(it) : m_stamps.erase(it);
     for (auto it = m_failed_stamps.begin(); it != m_failed_stamps.end(); )
         it = resolved_paths.count(it->first) ? std::next(it) : m_failed_stamps.erase(it);
+    for (auto it = m_retry_counts.begin(); it != m_retry_counts.end(); )
+        it = resolved_paths.count(it->first) ? std::next(it) : m_retry_counts.erase(it);
 
     // Seed a baseline for newly tracked files only.
     std::set<std::string> watched_dirs;
@@ -120,6 +124,7 @@ void SourceFileWatcher::clear()
     m_watched_files.clear();
     m_stamps.clear();
     m_failed_stamps.clear();
+    m_retry_counts.clear();
 }
 
 void SourceFileWatcher::forget_watched_files()
@@ -196,16 +201,29 @@ void SourceFileWatcher::commit_source_stamps(const std::map<std::string, SourceS
     for (const auto& [file, stamp] : stamps) {
         m_stamps[file] = stamp;
         m_failed_stamps.erase(file);
+        m_retry_counts.erase(file);
     }
 }
 
 void SourceFileWatcher::record_failed_attempt(const std::map<std::string, SourceStamp>& stamps)
 {
-    for (const auto& [file, stamp] : stamps)
+    constexpr int base_delay_ms = 1500;
+    constexpr int max_delay_ms  = 12000;
+
+    // One shared timer covers the whole batch; use the soonest-due file's delay so a file
+    // failing for the first time isn't held up by another that's already backed off further.
+    int next_delay_ms = max_delay_ms;
+    for (const auto& [file, stamp] : stamps) {
         m_failed_stamps[file] = stamp;
-    // One bonus retry: a file still being written or briefly locked (e.g. on Windows) may have
-    // settled by then. The failed-stamp record above keeps this from looping if it hasn't.
-    m_debounce_timer.Start(1500, wxTIMER_ONE_SHOT);
+        int& count = m_retry_counts[file];
+        int delay_ms = base_delay_ms << std::min(count, 3); // 1.5s, 3s, 6s, 12s, then held at 12s
+        next_delay_ms = std::min(next_delay_ms, delay_ms);
+        ++count;
+    }
+    // The failed-stamp record above keeps this from retrying forever if the file never settles:
+    // once its stamp stops advancing, changed_source_files() stops reporting it and no further
+    // retry gets armed.
+    m_debounce_timer.Start(next_delay_ms, wxTIMER_ONE_SHOT);
 }
 
 }} // namespace Slic3r::GUI

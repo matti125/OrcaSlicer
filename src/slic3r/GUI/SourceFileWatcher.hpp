@@ -90,10 +90,11 @@ private:
     // so a permanently unloadable file doesn't retry on every subsequent event.
     std::map<std::string, SourceStamp> changed_source_files() const;
     // Advances the baseline to the given stamps (a successful reload) and clears any recorded
-    // failure for them.
+    // failure and retry count for them.
     void commit_source_stamps(const std::map<std::string, SourceStamp>& stamps);
-    // Records a failed attempt at the given stamps and arms one bonus retry, for the transient
-    // case of a file still being written or briefly locked.
+    // Records a failed attempt at the given stamps and arms another retry, backing off per file
+    // (1.5s, 3s, 6s, capped at 12s) for the transient case of a file still being written or
+    // briefly locked -- e.g. a large STEP export that takes longer than one short retry to settle.
     void record_failed_attempt(const std::map<std::string, SourceStamp>& stamps);
 
     std::function<bool(const std::set<std::string>&)> m_on_changed;
@@ -105,6 +106,7 @@ private:
     std::set<std::string>              m_watched_files;
     std::map<std::string, SourceStamp> m_stamps;        // committed baseline
     std::map<std::string, SourceStamp> m_failed_stamps; // stamp of the last failed attempt, if any
+    std::map<std::string, int>         m_retry_counts;  // consecutive failed attempts, per file
     // Guards m_on_changed() against re-entry from a nested event loop pumped during the reload
     // it triggers (a modal dialog, wxBusyInfo) while this timer is re-armed by another fs event.
     bool                                m_reload_in_progress{ false };
