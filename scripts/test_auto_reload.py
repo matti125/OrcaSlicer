@@ -170,20 +170,14 @@ def write_obj_cube(path, size):
         f.write("\n".join(lines) + "\n")
 
 
-def write_truncated_stl(path, size):
-    """A syntactically broken STL: valid-looking content cut off mid-facet, no endsolid --
-    simulates an exporter's file caught mid-write, for phase I's failed-reload check."""
-    s = float(size)
-    v = [(0, 0, 0), (s, 0, 0), (s, s, 0), (0, s, 0), (0, 0, s), (s, 0, s), (s, s, s), (0, s, s)]
-    lines = ["solid test"]
-    for a, b, c in BOX_FACES:
-        lines.append("  facet normal 0 0 0\n    outer loop")
-        for i in (a, b, c):
-            lines.append("      vertex %g %g %g" % v[i])
-        lines.append("    endloop\n  endfacet")
-    data = "\n".join(lines)
+def write_truncated_stl(path):
+    """A syntactically broken STL: cut off before any facet is complete. admesh's ASCII reader
+    tolerantly accepts whatever complete facets it finds before a truncation point -- cutting
+    mid-cube (as this used to) leaves several complete facets and a non-empty, non-failing mesh.
+    Zero complete facets is what actually makes load_stl() report an empty mesh and
+    Model::read_from_file() throw, for phase I's failed-reload check."""
     with open(path, "w") as f:
-        f.write(data[: len(data) * 3 // 5])  # cut well before endsolid, mid-facet
+        f.write("solid test\n  facet normal 0 0 0\n    outer loop\n      vertex 0 0 0\n")
 
 
 def directory_noise(dir_path, stop_event, interval=0.2):
@@ -392,7 +386,7 @@ def main():
     print("\n[I] Overwrite with a truncated/corrupt file, then a valid one")
     pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % flaky_stl)
     tail.mark(); time.sleep(1.5)
-    write_truncated_stl(flaky_stl, 20)
+    write_truncated_stl(flaky_stl)
     ok = tail.wait_for(RELOAD_MARK, args.timeout)
     record("I1 a reload was attempted for the corrupt write", ok,
            "" if ok else "no reload line in log within %gs" % args.timeout)
@@ -400,15 +394,16 @@ def main():
         failed = tail.wait_for(LOAD_FAILED_MARK, args.timeout)
         record("I2 the load failure was logged, not silently accepted", failed,
                "" if failed else "no '%s' warning within %gs" % (LOAD_FAILED_MARK, args.timeout))
-        record("I3 no dialog appeared and the object is unchanged (still 12 mm)",
-               ask("  No error dialog, and is %s still the original 12 mm cube?" % os.path.basename(flaky_stl)))
+        record("I3 no dialog appeared for the failed load", ask("  No error/warning dialog popped up?"))
+        record("I4 the object is unchanged (still 12 mm)",
+               ask("  Is %s still the original 12 mm cube?" % os.path.basename(flaky_stl)))
         tail.mark()
         write_cube_stl(flaky_stl, 26)
         ok2 = tail.wait_for(RELOAD_MARK, args.timeout)
-        record("I4 a later valid write still reloads (the failed attempt didn't consume it)", ok2,
+        record("I5 a later valid write still reloads (the failed attempt didn't consume it)", ok2,
                "" if ok2 else "no reload line within %gs" % args.timeout)
         if ok2:
-            record("I5 model visibly updated", ask("  Did %s grow to 26 mm?" % os.path.basename(flaky_stl)))
+            record("I6 model visibly updated", ask("  Did %s grow to 26 mm?" % os.path.basename(flaky_stl)))
 
     print("\n[J] Two overwrites landing close together, different sizes -- both must be picked up")
     pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % quick_stl)
@@ -420,14 +415,19 @@ def main():
         tail.mark()
         # Written as soon as possible after J1's reload completes: the closer this lands to the
         # same wall-clock second as that reload committing its baseline, the more directly this
-        # exercises comparing (mtime, size) rather than mtime alone.
-        write_cube_stl(quick_stl, 21)
+        # exercises comparing (mtime, size) rather than mtime alone. The fractional size is
+        # deliberate, not cosmetic: write_cube_stl()'s "%g" formatting makes any two whole-number
+        # sizes from 10-99mm serialize to the exact same byte count (e.g. 18 and 21 both produce a
+        # 1471-byte file), which would silently turn this into the same-size case the design doc
+        # documents as accepted-invisible, instead of the different-size case this phase means to
+        # exercise.
+        write_cube_stl(quick_stl, 21.5)
         ok2 = tail.wait_for(RELOAD_MARK, args.timeout)
         record("J2 reload after the second write", ok2,
                "" if ok2 else "no reload line within %gs -- a same-second rewrite may have been missed" % args.timeout)
         if ok2:
-            record("J3 final geometry is the second write (21 mm, not 18)",
-                   ask("  Is %s 21 mm?" % os.path.basename(quick_stl)))
+            record("J3 final geometry is the second write (21.5 mm, not 18)",
+                   ask("  Is %s 21.5 mm?" % os.path.basename(quick_stl)))
 
     print("\n[K] Background directory noise while overwriting -- reload must still fire within the debounce cap")
     stop_noise = threading.Event()
