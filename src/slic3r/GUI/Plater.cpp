@@ -11659,9 +11659,9 @@ bool Plater::priv::reload_from_disk(bool interactive)
                 sidebar->obj_list()->reload_all_plates();
             }
         }
-        catch (std::exception&)
+        catch (std::exception& ex)
         {
-            // error while loading
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": failed to load " << path << ": " << ex.what();
             return false;
         }
 
