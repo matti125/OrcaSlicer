@@ -42,11 +42,10 @@ same-size rewrite is still invisible; that's the accepted limit short of hashing
 content.
 
 A file whose current stamp reads as missing (deleted, unmounted, or caught mid-rename
-between the old name's removal and the new one's arrival) is not treated as a change.
-The alternative — the delete looking exactly like an edit — used to make a vanished
-file fire a reload against a path that wasn't there. Waiting for the file to come back
-is also just the correct behavior for a rename-into-place, which necessarily vanishes
-the old name for an instant.
+between the old name's removal and the new one's arrival) is not treated as a change:
+treating a delete as if it were an edit would fire a reload against a path that isn't
+there. Waiting for the file to come back is also just the correct behavior for a
+rename-into-place, which necessarily vanishes the old name for an instant.
 
 The debounce window coalesces a burst of events into one 500ms quiet period, but caps
 the total delay at 2s from the first event in a burst: a directory with unrelated
@@ -61,8 +60,8 @@ next — `commit_source_stamps()` advances the baseline only for files that were
 actually reloaded successfully. This split matters because a reload can fail for a
 reason that has nothing to do with whether the file changed: an exception from a
 still-writing or momentarily locked file, or a volume this build simply can't parse.
-Committing the baseline unconditionally, as an earlier version did, made that failure
-permanent — the change was consumed and nothing would retry it.
+Committing the baseline unconditionally would make that failure permanent — the
+change would be consumed with nothing left to retry it.
 
 A failed attempt instead records the stamp that failed and backs off: 1.5s, 3s, 6s,
 holding at 12s from there, per file. The failed-stamp record is what keeps this from
@@ -75,11 +74,13 @@ timer tick.
 
 The watcher's callback receives the exact set of files that changed.
 `Plater::priv::reload_source_files()` selects only the `ModelVolume`s whose resolved
-source is in that set — not every object on the plate, which is what
+source is in that set, so with several objects loaded, editing one CAD file reimports
+only that object, not everything else on the plate. This is narrower than
 `reload_all_from_disk()` (still used by the "Reload all" menu item and the canvas
-shortcut) does. With several objects loaded, editing one CAD file no longer reimports
-every other object's unrelated source on every event. One instance's `GLVolume` is
-enough to select a volume for this: `reload_from_disk()` edits the shared
+shortcut), which selects every object regardless of which one changed — appropriate
+there because the user asked for it explicitly, not appropriate for something that
+runs on every detected file change. One instance's `GLVolume` is enough to select a
+volume for this: `reload_from_disk()` edits the shared
 `ModelObject`/`ModelVolume` directly, so the change reaches every instance regardless
 of which one's `GLVolume` triggered the selection. A cloned volume (the Clone tool
 deep-copies a `ModelVolume`, source path included, into an independent object) matches
@@ -116,9 +117,9 @@ but most reloads touch just one). If a slice is already running, it's cancelled 
 the queue starts once cancellation completes; slicing directly would have
 `MainFrame::get_enable_slice_status()` see a slice as still in progress and silently
 skip the request. Each queued plate is selected, its slice result invalidated
-directly (`reload_all_from_disk()`'s own `update()` only *schedules* that
-invalidation via a debounce timer, which races a slice-enable check run right after
-it), and sliced; `on_process_completed()` steps to the next queued plate once each one
+directly (`reload_from_disk()`'s own `update()` only *schedules* that invalidation
+via a debounce timer, which races a slice-enable check run right after it), and
+sliced; `on_process_completed()` steps to the next queued plate once each one
 finishes. Once the queue drains, the view returns to whichever plate was current
 before the sequence started, unless that's already the current plate.
 

@@ -12763,7 +12763,7 @@ void Plater::priv::slice_after_reload()
     plates_pending_slice_after_reload.erase(plates_pending_slice_after_reload.begin());
     q->select_plate(plate_idx);
 
-    // reload_all_from_disk() ends with its own update() call, which only *schedules* the
+    // reload_from_disk() ends with its own update() call, which only *schedules* the
     // model-changed invalidation via a 500ms debounce timer (schedule_background_process())
     // rather than applying it right away. Checking the slice-enable state immediately
     // afterward races that timer: about half the time it hasn't fired yet, so
