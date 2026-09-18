@@ -375,8 +375,8 @@ def main():
                "" if no_missing_warning else "reload_from_disk() logged a missing-source warning for it")
         record("G4 no dialog appeared for the missing source", ask("  No error/warning dialog popped up?"))
         record("G5 only the changed object updated",
-               ask("  Did only the second object grow to 16 mm, with the missing-source object and the "
-                   "first object both left exactly as they were?"))
+               ask("  Did only %s grow to 16 mm, with %s and %s both left exactly as they were?"
+                   % (os.path.basename(stl_g_changed), os.path.basename(stl_g_missing), os.path.basename(stl))))
 
     print("\n[H] .obj source, overwritten -- must reload with no color-import dialog")
     pause("Import %s as a new object." % obj_path)
@@ -386,7 +386,7 @@ def main():
     record("H1 reload after .obj overwrite", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
     if ok:
         record("H2 no color-import dialog appeared", ask("  No color/material-import dialog popped up?"))
-        record("H3 model visibly updated", ask("  Did the object grow to 22 mm?"))
+        record("H3 model visibly updated", ask("  Did %s grow to 22 mm?" % os.path.basename(obj_path)))
 
     print("\n[I] Overwrite with a truncated/corrupt file, then a valid one")
     pause("Import %s as a new object." % flaky_stl)
@@ -400,14 +400,14 @@ def main():
         record("I2 the load failure was logged, not silently accepted", failed,
                "" if failed else "no '%s' warning within %gs" % (LOAD_FAILED_MARK, args.timeout))
         record("I3 no dialog appeared and the object is unchanged (still 12 mm)",
-               ask("  No error dialog, and the object is still the original 12 mm cube?"))
+               ask("  No error dialog, and is %s still the original 12 mm cube?" % os.path.basename(flaky_stl)))
         tail.mark()
         write_cube_stl(flaky_stl, 26)
         ok2 = tail.wait_for(RELOAD_MARK, args.timeout)
         record("I4 a later valid write still reloads (the failed attempt didn't consume it)", ok2,
                "" if ok2 else "no reload line within %gs" % args.timeout)
         if ok2:
-            record("I5 model visibly updated", ask("  Did the object grow to 26 mm?"))
+            record("I5 model visibly updated", ask("  Did %s grow to 26 mm?" % os.path.basename(flaky_stl)))
 
     print("\n[J] Two overwrites landing close together, different sizes -- both must be picked up")
     pause("Import %s as a new object." % quick_stl)
@@ -425,7 +425,8 @@ def main():
         record("J2 reload after the second write", ok2,
                "" if ok2 else "no reload line within %gs -- a same-second rewrite may have been missed" % args.timeout)
         if ok2:
-            record("J3 final geometry is the second write (21 mm, not 18)", ask("  Is the object 21 mm?"))
+            record("J3 final geometry is the second write (21 mm, not 18)",
+                   ask("  Is %s 21 mm?" % os.path.basename(quick_stl)))
 
     print("\n[K] Background directory noise while overwriting -- reload must still fire within the debounce cap")
     stop_noise = threading.Event()
@@ -440,7 +441,7 @@ def main():
     record("K1 reload still fires despite directory noise", ok,
            "" if ok else "no reload line within 6s -- the debounce cap may not be holding")
     if ok:
-        record("K2 model visibly updated", ask("  Did the object from phase G grow to 24 mm?"))
+        record("K2 model visibly updated", ask("  Did %s grow to 24 mm?" % os.path.basename(stl_g_changed)))
 
     print("\n[L] Multi-plate: only the plate with the reloaded object should reslice")
     pause("Set up two plates for this check:\n"
@@ -474,7 +475,7 @@ def main():
     quiet = tail.absent_after(RELOAD_MARK, args.quiet_window)
     record("E1 no reload when '%s' is off" % PREF_RELOAD_LABEL, quiet, "" if quiet else "a reload happened anyway")
     if quiet:
-        record("E2 model unchanged", ask("  Is the model still the pillar grid (no cube)?"))
+        record("E2 model unchanged", ask("  Is %s still the pillar grid (not a cube)?" % os.path.basename(stl)))
 
     # --- summary --------------------------------------------------------------------------
     failed = [r for r in results if not r[1]]
