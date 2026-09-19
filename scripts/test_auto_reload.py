@@ -275,19 +275,23 @@ def main():
     os.makedirs(work_dir, exist_ok=True)
     stl = os.path.join(work_dir, "cube.stl")
     write_cube_stl(stl, 20)
-    # Two extra objects for phase G (targeted reload alongside a missing source); written now so
-    # the file list printed below is complete, imported later once phase G is reached.
+    # Extra objects for phases G-L; written now so the file list printed below is complete,
+    # imported later once each phase is reached. Each one is only ever shrunk afterward, never
+    # grown: Auto Arrange only runs once, right after import, so it only ever sees an object at
+    # its largest -- shrinking afterward can't grow one into whatever space arrange left for a
+    # neighbor, the way growing did (confirmed: the slicer's overlap check flagged exactly that
+    # during testing).
     stl_g_changed = os.path.join(work_dir, "second_a.stl")
     stl_g_missing = os.path.join(work_dir, "second_b.stl")
-    write_cube_stl(stl_g_changed, 10)
+    write_cube_stl(stl_g_changed, 30)
     write_cube_stl(stl_g_missing, 8)
     # More extra objects, for phases H (.obj), I (corrupt write) and J (same-second rewrite).
     obj_path = os.path.join(work_dir, "cube.obj")
     flaky_stl = os.path.join(work_dir, "flaky.stl")
     quick_stl = os.path.join(work_dir, "quick.stl")
-    write_obj_cube(obj_path, 14)
-    write_cube_stl(flaky_stl, 12)
-    write_cube_stl(quick_stl, 15)
+    write_obj_cube(obj_path, 22)
+    write_cube_stl(flaky_stl, 26)
+    write_cube_stl(quick_stl, 25)
     results = []
 
     def record(name, ok, detail=""):
@@ -352,7 +356,7 @@ def main():
           "then Auto Arrange so they don't overlap it or each other."
           % (stl_g_changed, stl_g_missing))
     tail.mark(); time.sleep(1.5)
-    write_cube_stl(stl_g_changed, 16)
+    write_cube_stl(stl_g_changed, 24)
     os.remove(stl_g_missing)
     ok = tail.wait_for(RELOAD_MARK, args.timeout)
     record("G1 reload after the change", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
@@ -365,18 +369,18 @@ def main():
                "" if no_missing_warning else "reload_from_disk() logged a missing-source warning for it")
         record("G4 no dialog appeared for the missing source", ask("  No error/warning dialog popped up?"))
         record("G5 only the changed object updated",
-               ask("  Did only %s grow to 16 mm, with %s and %s both left exactly as they were?"
+               ask("  Did only %s shrink to 24 mm, with %s and %s both left exactly as they were?"
                    % (os.path.basename(stl_g_changed), os.path.basename(stl_g_missing), os.path.basename(stl))))
 
     print("\n[H] .obj source, overwritten -- must reload with no color-import dialog")
     pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % obj_path)
     tail.mark(); time.sleep(1.5)
-    write_obj_cube(obj_path, 22)
+    write_obj_cube(obj_path, 14)
     ok = tail.wait_for(RELOAD_MARK, args.timeout)
     record("H1 reload after .obj overwrite", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
     if ok:
         record("H2 no color-import dialog appeared", ask("  No color/material-import dialog popped up?"))
-        record("H3 model visibly updated", ask("  Did %s grow to 22 mm?" % os.path.basename(obj_path)))
+        record("H3 model visibly updated", ask("  Did %s shrink to 14 mm?" % os.path.basename(obj_path)))
 
     print("\n[I] Overwrite with a truncated/corrupt file, then a valid one")
     pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % flaky_stl)
@@ -390,15 +394,15 @@ def main():
         record("I2 the load failure was logged, not silently accepted", failed,
                "" if failed else "no '%s' warning within %gs" % (LOAD_FAILED_MARK, args.timeout))
         record("I3 no dialog appeared for the failed load", ask("  No error/warning dialog popped up?"))
-        record("I4 the object is unchanged (still 12 mm)",
-               ask("  Is %s still the original 12 mm cube?" % os.path.basename(flaky_stl)))
+        record("I4 the object is unchanged (still 26 mm)",
+               ask("  Is %s still the original 26 mm cube?" % os.path.basename(flaky_stl)))
         tail.mark()
-        write_cube_stl(flaky_stl, 26)
+        write_cube_stl(flaky_stl, 12)
         ok2 = tail.wait_for(RELOAD_MARK, args.timeout)
         record("I5 a later valid write still reloads (the failed attempt didn't consume it)", ok2,
                "" if ok2 else "no reload line within %gs" % args.timeout)
         if ok2:
-            record("I6 model visibly updated", ask("  Did %s grow to 26 mm?" % os.path.basename(flaky_stl)))
+            record("I6 model visibly updated", ask("  Did %s shrink to 12 mm?" % os.path.basename(flaky_stl)))
 
     print("\n[J] Two overwrites landing close together, different sizes -- both must be picked up")
     pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % quick_stl)
@@ -412,17 +416,18 @@ def main():
         # same wall-clock second as that reload committing its baseline, the more directly this
         # exercises comparing (mtime, size) rather than mtime alone. The fractional size is
         # deliberate, not cosmetic: write_cube_stl()'s "%g" formatting makes any two whole-number
-        # sizes from 10-99mm serialize to the exact same byte count (e.g. 18 and 21 both produce a
+        # sizes from 10-99mm serialize to the exact same byte count (e.g. 18 and 15 both produce a
         # 1471-byte file), which would silently turn this into the same-size case the design doc
         # documents as accepted-invisible, instead of the different-size case this phase means to
-        # exercise.
-        write_cube_stl(quick_stl, 21.5)
+        # exercise. Shrinking (not growing) throughout, same reason as G/H/I: Auto Arrange only
+        # sees this object at its largest, at import time.
+        write_cube_stl(quick_stl, 14.5)
         ok2 = tail.wait_for(RELOAD_MARK, args.timeout)
         record("J2 reload after the second write", ok2,
                "" if ok2 else "no reload line within %gs -- a same-second rewrite may have been missed" % args.timeout)
         if ok2:
-            record("J3 final geometry is the second write (21.5 mm, not 18)",
-                   ask("  Is %s 21.5 mm?" % os.path.basename(quick_stl)))
+            record("J3 final geometry is the second write (14.5 mm, not 18)",
+                   ask("  Is %s 14.5 mm?" % os.path.basename(quick_stl)))
 
     print("\n[K] Background directory noise while overwriting -- reload must still fire within the debounce cap")
     stop_noise = threading.Event()
@@ -430,14 +435,14 @@ def main():
     tail.mark()
     noise_thread.start()
     time.sleep(0.5)
-    write_cube_stl(stl_g_changed, 24)  # reuses the object imported in phase G
+    write_cube_stl(stl_g_changed, 16)  # reuses the object imported in phase G, shrinking it further
     ok = tail.wait_for(RELOAD_MARK, 6.0)  # well under the noise's duration, comfortably above the ~2.5s cap
     stop_noise.set()
     noise_thread.join(timeout=2.0)
     record("K1 reload still fires despite directory noise", ok,
            "" if ok else "no reload line within 6s -- the debounce cap may not be holding")
     if ok:
-        record("K2 model visibly updated", ask("  Did %s grow to 24 mm?" % os.path.basename(stl_g_changed)))
+        record("K2 model visibly updated", ask("  Did %s shrink to 16 mm?" % os.path.basename(stl_g_changed)))
 
     print("\n[L] Multi-plate: only the plate with the reloaded object should reslice")
     pause("Set up two plates for this check:\n"
@@ -446,7 +451,7 @@ def main():
           "  3. Leave at least one other object on plate 1.\n"
           "  4. Click \"Slice all\" and wait for both plates to finish slicing." % stl_g_changed)
     tail.mark(); time.sleep(1.5)
-    write_cube_stl(stl_g_changed, 30)
+    write_cube_stl(stl_g_changed, 10)
     ok = tail.wait_for(RELOAD_MARK, args.timeout)
     record("L1 reload after the change", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
     if ok:
