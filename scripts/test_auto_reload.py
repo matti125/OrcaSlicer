@@ -369,7 +369,7 @@ def main():
                "" if no_missing_warning else "reload_from_disk() logged a missing-source warning for it")
         record("G4 no dialog appeared for the missing source", ask("  No error/warning dialog popped up?"))
         record("G5 only the changed object updated",
-               ask("  Did only %s shrink to 24 mm, with %s and %s both left exactly as they were?"
+               ask("  Did only %s shrink to 24 mm, with %s still 8 mm and %s still 25 mm?"
                    % (os.path.basename(stl_g_changed), os.path.basename(stl_g_missing), os.path.basename(stl))))
 
     print("\n[H] .obj source, overwritten -- must reload with no color-import dialog")
@@ -509,7 +509,9 @@ def main():
     quiet = tail.absent_after(RELOAD_MARK, args.quiet_window)
     record("E1 no reload when '%s' is off" % PREF_RELOAD_LABEL, quiet, "" if quiet else "a reload happened anyway")
     if quiet:
-        record("E2 model unchanged", ask("  Is %s still the pillar grid (not a cube)?" % os.path.basename(stl)))
+        record("E2 model unchanged",
+               ask("  Is %s still the ~94 x 94 mm pillar grid, %g mm tall (not a 35 mm cube)?"
+                   % (os.path.basename(stl), h2)))
 
     # --- summary --------------------------------------------------------------------------
     failed = [r for r in results if not r[1]]
