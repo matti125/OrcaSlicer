@@ -3,15 +3,19 @@
 
 Drives the on-disk side of the feature (in-place overwrite, rename-into-place) against a
 running OrcaSlicer and checks the outcome in OrcaSlicer's own log. The GUI steps that can't
-be scripted (importing the model, toggling the two preferences) are prompted for.
+be scripted are kept to a one-time setup: the first run asks you to import the generated test
+objects onto three plates and save that as a project file; every run after that (including a
+future one on a different day) just asks you to open the saved project, then drives every phase
+by itself -- the only GUI work left per phase is answering a handful of "does this look right"
+questions.
 
     python3 scripts/test_auto_reload.py [options]
 
 Use --only to jump straight to one or more phases instead of running the whole sequence, e.g.
---only L to re-check just the multi-plate fix. This assumes OrcaSlicer is already running with
-whatever objects/state the earlier phases would have set up -- each phase's own prompt says what
-it expects. Run with --help for the full list of options (data dir, timeouts, pillar-grid height
-for the mid-slice test, work dir for the generated model).
+--only L to re-check just the multi-plate fix -- this still just opens the same saved project,
+so nothing needs to have "already run" in this invocation for a phase to work. Run with --help
+for the full list of options (data dir, timeouts, pillar-grid height for the mid-slice test,
+work dir for the generated model and saved project).
 
 Requires OrcaSlicer's log severity at the default "info" level (Preferences > Log level).
 """
@@ -267,12 +271,10 @@ def main():
                         help="seconds into the slow slice at which the second change is written (default 3)")
     # Not a system temp dir: macOS file dialogs hide /var, where those live.
     parser.add_argument("--work-dir", default=os.path.expanduser("~/orca_autoreload_test"),
-                        help="where to put the test model (default ~/orca_autoreload_test)")
+                        help="where to put the test model and the saved project (default ~/orca_autoreload_test)")
     parser.add_argument("--only", metavar="LETTERS",
                         help="run only these phases, comma-separated (e.g. --only L or --only G,K,L) "
-                             "instead of the full A-E sequence. Assumes OrcaSlicer is already running "
-                             "with whatever objects/state the earlier phases would have set up -- see "
-                             "each phase's own prompt for what it expects.")
+                             "instead of the full A-E sequence.")
     args = parser.parse_args()
 
     log_dir = os.path.join(args.data_dir, "log")
@@ -281,25 +283,32 @@ def main():
 
     work_dir = os.path.abspath(args.work_dir)
     os.makedirs(work_dir, exist_ok=True)
-    stl = os.path.join(work_dir, "cube.stl")
-    write_cube_stl(stl, 20)
-    # Extra objects for phases G-L; written now so the file list printed below is complete,
-    # imported later once each phase is reached. Each one is only ever shrunk afterward, never
-    # grown: Auto Arrange only runs once, right after import, so it only ever sees an object at
-    # its largest -- shrinking afterward can't grow one into whatever space arrange left for a
-    # neighbor, the way growing did (confirmed: the slicer's overlap check flagged exactly that
-    # during testing).
-    stl_g_changed = os.path.join(work_dir, "second_a.stl")
-    stl_g_missing = os.path.join(work_dir, "second_b.stl")
-    write_cube_stl(stl_g_changed, 30)
-    write_cube_stl(stl_g_missing, 8)
-    # More extra objects, for phases H (.obj), I (corrupt write) and J (same-second rewrite).
-    obj_path = os.path.join(work_dir, "cube.obj")
-    flaky_stl = os.path.join(work_dir, "flaky.stl")
-    quick_stl = os.path.join(work_dir, "quick.stl")
-    write_obj_cube(obj_path, 22)
-    write_cube_stl(flaky_stl, 26)
-    write_cube_stl(quick_stl, 25)
+    project_path = os.path.join(work_dir, "autoreload_test.3mf")
+    first_time = not os.path.exists(project_path)
+
+    stl           = os.path.join(work_dir, "cube.stl")        # plate 1, alone
+    stl_g_changed = os.path.join(work_dir, "second_a.stl")    # plate 2, with stl_g_missing
+    stl_g_missing = os.path.join(work_dir, "second_b.stl")    # plate 2, with stl_g_changed
+    obj_path      = os.path.join(work_dir, "cube.obj")        # plate 3, with flaky_stl and quick_stl
+    flaky_stl     = os.path.join(work_dir, "flaky.stl")       # plate 3
+    quick_stl     = os.path.join(work_dir, "quick.stl")       # plate 3
+
+    if first_time:
+        # Only written once, before the one-time import+arrange+save below: each object is
+        # imported at its largest size here and every phase only ever shrinks it afterward
+        # (across every future run of this script, not just this one), so a plate's Auto Arrange
+        # -- done once, as part of that one-time setup -- never has to account for an object
+        # growing into a neighbor. A later run reusing the saved project intentionally does NOT
+        # reset these: each phase's own write() carries the file from whatever the last run left
+        # it at to that phase's own target size, which the watcher picks up as a change either
+        # way (the mtime always advances on a real write, regardless of the size).
+        write_cube_stl(stl, 20)
+        write_cube_stl(stl_g_changed, 30)
+        write_cube_stl(stl_g_missing, 8)
+        write_obj_cube(obj_path, 22)
+        write_cube_stl(flaky_stl, 26)
+        write_cube_stl(quick_stl, 25)
+
     h1, h2 = args.slow_height, args.slow_height / 2
     results = []
 
@@ -309,18 +318,19 @@ def main():
 
     # --- phase bodies -----------------------------------------------------------------------
     # Each is a closure over the setup above (tail, args, record, ask, pause, the file paths).
-    # Grouped below by the preferences they require; PHASES pairs each with that requirement so
-    # main() only prompts for a preference change when the next phase to actually run needs one.
+    # None of them import, arrange or move objects between plates -- that's all done once, by
+    # the setup below, and reused by every future run. A phase only ever writes a file, checks
+    # the log, and asks a plain yes/no question about what's on screen.
 
     def phase_a():
-        print("\n[A] In-place overwrite (20 -> 30 mm)")
+        print("\n[A] In-place overwrite (plate 1, cube.stl -> 30 mm)")
         tail.mark(); time.sleep(1.5)
         write_cube_stl(stl, 30)
         ok = tail.wait_for(RELOAD_MARK, args.timeout)
         record("A1 reload after in-place overwrite", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
         if ok:
             record("A2 no slice when '%s' is off" % PREF_SLICE_LABEL, tail.absent_after(SLICE_START_MARK, args.quiet_window))
-            record("A3 model visibly updated", ask("  Did the cube grow to 30 mm?"))
+            record("A3 model visibly updated", ask("  Did cube.stl grow to 30 mm?"))
 
     def phase_b():
         print("\n[B] Rename-into-place, the temp-file-then-rename pattern most exporters use (30 -> 40 mm)")
@@ -329,7 +339,7 @@ def main():
         ok = tail.wait_for(RELOAD_MARK, args.timeout)
         record("B1 reload after rename-into-place", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
         if ok:
-            record("B2 model visibly updated", ask("  Did the cube grow to 40 mm?"))
+            record("B2 model visibly updated", ask("  Did cube.stl grow to 40 mm?"))
 
     def phase_c():
         print("\n[C] In-place overwrite again after the rename (40 -> 50 mm) -- checks the watch was re-armed")
@@ -353,10 +363,12 @@ def main():
             record("D4 stayed on the current tab", ask("  Is the Prepare tab still selected (no jump to Preview)?"))
 
     def phase_g():
-        print("\n[G] Two more objects: one's source changes, the other's vanishes")
-        pause("Import both %s and %s as two NEW, separate objects (in addition to the existing one), "
-              "then Auto Arrange so they don't overlap it or each other."
-              % (stl_g_changed, stl_g_missing))
+        print("\n[G] Plate 2: one object's source changes, the other's vanishes")
+        if not os.path.exists(stl_g_missing):
+            # An earlier run of this same phase deleted it; recreate it so this phase has
+            # something to delete again, rather than assuming this is the file's first run.
+            write_cube_stl(stl_g_missing, 8)
+            time.sleep(1.5)
         tail.mark(); time.sleep(1.5)
         write_cube_stl(stl_g_changed, 24)
         os.remove(stl_g_missing)
@@ -371,23 +383,20 @@ def main():
                    "" if no_missing_warning else "reload_from_disk() logged a missing-source warning for it")
             record("G4 no dialog appeared for the missing source", ask("  No error/warning dialog popped up?"))
             record("G5 only the changed object updated",
-                   ask("  Did only %s shrink to 24 mm, with %s still 8 mm and %s still 25 mm?"
-                       % (os.path.basename(stl_g_changed), os.path.basename(stl_g_missing), os.path.basename(stl))))
+                   ask("  On plate 2, did only second_a.stl shrink to 24 mm, with second_b.stl still 8 mm?"))
 
     def phase_h():
-        print("\n[H] .obj source, overwritten -- must reload with no color-import dialog")
-        pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % obj_path)
+        print("\n[H] Plate 3: .obj source, overwritten -- must reload with no color-import dialog")
         tail.mark(); time.sleep(1.5)
         write_obj_cube(obj_path, 14)
         ok = tail.wait_for(RELOAD_MARK, args.timeout)
         record("H1 reload after .obj overwrite", ok, "" if ok else "no reload line in log within %gs" % args.timeout)
         if ok:
             record("H2 no color-import dialog appeared", ask("  No color/material-import dialog popped up?"))
-            record("H3 model visibly updated", ask("  Did %s shrink to 14 mm?" % os.path.basename(obj_path)))
+            record("H3 model visibly updated", ask("  Did cube.obj shrink to 14 mm?"))
 
     def phase_i():
-        print("\n[I] Overwrite with a truncated/corrupt file, then a valid one")
-        pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % flaky_stl)
+        print("\n[I] Plate 3: overwrite with a truncated/corrupt file, then a valid one")
         tail.mark(); time.sleep(1.5)
         write_truncated_stl(flaky_stl)
         ok = tail.wait_for(RELOAD_MARK, args.timeout)
@@ -399,18 +408,17 @@ def main():
                    "" if failed else "no '%s' warning within %gs" % (LOAD_FAILED_MARK, args.timeout))
             record("I3 no dialog appeared for the failed load", ask("  No error/warning dialog popped up?"))
             record("I4 the object is unchanged (still 26 mm)",
-                   ask("  Is %s still the original 26 mm cube?" % os.path.basename(flaky_stl)))
+                   ask("  Is flaky.stl still the original 26 mm cube?"))
             tail.mark()
             write_cube_stl(flaky_stl, 12)
             ok2 = tail.wait_for(RELOAD_MARK, args.timeout)
             record("I5 a later valid write still reloads (the failed attempt didn't consume it)", ok2,
                    "" if ok2 else "no reload line within %gs" % args.timeout)
             if ok2:
-                record("I6 model visibly updated", ask("  Did %s shrink to 12 mm?" % os.path.basename(flaky_stl)))
+                record("I6 model visibly updated", ask("  Did flaky.stl shrink to 12 mm?"))
 
     def phase_j():
-        print("\n[J] Two overwrites landing close together, different sizes -- both must be picked up")
-        pause("Import %s as a new object, then Auto Arrange so it doesn't overlap the others." % quick_stl)
+        print("\n[J] Plate 3: two overwrites landing close together, different sizes -- both must be picked up")
         tail.mark(); time.sleep(1.5)
         write_cube_stl(quick_stl, 18)
         ok = tail.wait_for(RELOAD_MARK, args.timeout)
@@ -424,39 +432,35 @@ def main():
             # sizes from 10-99mm serialize to the exact same byte count (e.g. 18 and 15 both produce a
             # 1471-byte file), which would silently turn this into the same-size case the design doc
             # documents as accepted-invisible, instead of the different-size case this phase means to
-            # exercise. Shrinking (not growing) throughout, same reason as G/H/I: Auto Arrange only
-            # sees this object at its largest, at import time.
+            # exercise.
             write_cube_stl(quick_stl, 14.5)
             ok2 = tail.wait_for(RELOAD_MARK, args.timeout)
             record("J2 reload after the second write", ok2,
                    "" if ok2 else "no reload line within %gs -- a same-second rewrite may have been missed" % args.timeout)
             if ok2:
                 record("J3 final geometry is the second write (14.5 mm, not 18)",
-                       ask("  Is %s 14.5 mm?" % os.path.basename(quick_stl)))
+                       ask("  Is quick.stl 14.5 mm?"))
 
     def phase_k():
-        print("\n[K] Background directory noise while overwriting -- reload must still fire within the debounce cap")
+        print("\n[K] Plate 2: background directory noise while overwriting -- reload must still fire within the debounce cap")
         stop_noise = threading.Event()
         noise_thread = threading.Thread(target=directory_noise, args=(work_dir, stop_noise), daemon=True)
         tail.mark()
         noise_thread.start()
         time.sleep(0.5)
-        write_cube_stl(stl_g_changed, 16)  # reuses the object imported in phase G, shrinking it further
+        write_cube_stl(stl_g_changed, 16)  # reuses second_a.stl from phase G, shrinking it further
         ok = tail.wait_for(RELOAD_MARK, 6.0)  # well under the noise's duration, comfortably above the ~2.5s cap
         stop_noise.set()
         noise_thread.join(timeout=2.0)
         record("K1 reload still fires despite directory noise", ok,
                "" if ok else "no reload line within 6s -- the debounce cap may not be holding")
         if ok:
-            record("K2 model visibly updated", ask("  Did %s shrink to 16 mm?" % os.path.basename(stl_g_changed)))
+            record("K2 model visibly updated", ask("  Did second_a.stl shrink to 16 mm?"))
 
     def phase_l():
         print("\n[L] Multi-plate: only the plate with the reloaded object should reslice")
-        pause("Set up two plates for this check:\n"
-              "  1. Make sure there are at least 2 plates (\"+\" in the plate list to add one if needed).\n"
-              "  2. Move the object built from %s onto plate 2 (drag it there, or right-click > Move to plate).\n"
-              "  3. Leave at least one other object on plate 1.\n"
-              "  4. Click \"Slice all\" and wait for both plates to finish slicing." % stl_g_changed)
+        pause("Click \"Slice all\" now (if plate 1 and plate 2 aren't both already sliced) and "
+              "wait for both to finish.")
         tail.mark(); time.sleep(1.5)
         write_cube_stl(stl_g_changed, 10)
         ok = tail.wait_for(RELOAD_MARK, args.timeout)
@@ -467,7 +471,7 @@ def main():
             if started:
                 done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 3)
                 record("L3 slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 3))
-            record("L4 only plate 2 (with the reloaded object) resliced",
+            record("L4 only plate 2 (with second_a.stl) resliced",
                    ask("  Check both plates' previews: did only plate 2's update, with plate 1's slice result "
                        "left untouched (not marked as needing a re-slice)?"))
             record("L5 view returned to where it was before this check",
@@ -478,13 +482,9 @@ def main():
         # Deliberately last among the reload-on phases: the pillar grid is slow to slice by design
         # (that's the point, to give a real slice something to interrupt), which makes this the
         # slowest single phase in the whole script on a slow machine. Everything faster runs first.
-        print("\n[F] Change arriving mid-slice: cube -> %g mm pillar grid, then %g mm while that slices" % (h1, h2))
-        pause("This phase grows %s into a ~94 x 94 mm pillar grid (write_pillars_stl()'s default "
-              "footprint, independent of height), which will overlap the objects phases G-L added if "
-              "they're all still sharing its plate. Move %s's object to its own NEW, empty plate now "
-              "(drag it onto \"+\" in the plate list, or right-click > Move to new plate), then switch "
-              "to that plate."
-              % (os.path.basename(stl), os.path.basename(stl)))
+        # cube.stl has plate 1 to itself (set up once, see main()'s setup instructions), so growing
+        # it into a large pillar grid here never overlaps anything else.
+        print("\n[F] Plate 1: change arriving mid-slice: cube -> %g mm pillar grid, then %g mm while that slices" % (h1, h2))
         tail.mark(); time.sleep(1.5)
         write_pillars_stl(stl, h1)
         ok = tail.wait_for(RELOAD_MARK, args.timeout) and tail.wait_for(SLICE_START_MARK, args.timeout)
@@ -508,15 +508,14 @@ def main():
                 record("F6 final geometry is the second change", ask("  Are the pillars %g mm tall (not %g)?" % (h2, h1)))
 
     def phase_e():
-        print("\n[E] In-place overwrite with auto-reload off (pillars -> 35 mm cube)")
+        print("\n[E] Plate 1: in-place overwrite with auto-reload off (pillars -> 35 mm cube)")
         tail.mark(); time.sleep(1.5)
         write_cube_stl(stl, 35)
         quiet = tail.absent_after(RELOAD_MARK, args.quiet_window)
         record("E1 no reload when '%s' is off" % PREF_RELOAD_LABEL, quiet, "" if quiet else "a reload happened anyway")
         if quiet:
             record("E2 model unchanged",
-                   ask("  Is %s still the ~94 x 94 mm pillar grid, %g mm tall (not a 35 mm cube)?"
-                       % (os.path.basename(stl), h2)))
+                   ask("  Is cube.stl still the ~94 x 94 mm pillar grid, %g mm tall (not a 35 mm cube)?" % h2))
 
     # (letter, (want_reload, want_slice), fn), in the order they normally run.
     PHASES = [
@@ -544,19 +543,29 @@ def main():
     else:
         selected = PHASES
 
-    full_run = not args.only
-
-    print("Test model: %s (20 mm cube)" % stl)
-    if full_run:
-        pause("1. Start the OrcaSlicer build under test (a fresh, empty project).\n"
-              "2. Preferences: ENABLE  '%s'\n"
-              "                DISABLE '%s'\n"
-              "3. Import the test model above (File > Import, or drag it onto the plate)."
-              % (PREF_RELOAD_LABEL, PREF_SLICE_LABEL))
+    # --- one-time setup, or reopen the project it produced ---------------------------------
+    if first_time:
+        pause("One-time setup -- OrcaSlicer will remember this as a project file, so this only\n"
+              "needs to happen once; every future run of this script (today or later) will just\n"
+              "ask you to reopen it.\n"
+              "1. Start the OrcaSlicer build under test with a fresh, empty project.\n"
+              "2. Import %s onto the first plate, alone.\n"
+              "3. Add a new plate. Import %s and %s onto it, together.\n"
+              "4. Add another new plate. Import %s, %s and %s onto it, then Auto Arrange that "
+              "plate so they don't overlap each other.\n"
+              "5. Save the project as: %s"
+              % (os.path.basename(stl), os.path.basename(stl_g_changed), os.path.basename(stl_g_missing),
+                 os.path.basename(obj_path), os.path.basename(flaky_stl), os.path.basename(quick_stl),
+                 project_path))
+        while not os.path.exists(project_path):
+            input("  Don't see %s yet -- save the project there, then press Enter to re-check... " % project_path)
     else:
-        print("Running only: %s -- make sure OrcaSlicer is already running with whatever objects/state "
-              "the earlier phases would have set up (see each phase's own prompt for what it expects)."
-              % ", ".join(letter for letter, _, _ in selected))
+        pause("Open the saved test project: %s\n"
+              "(To redo the one-time setup instead, quit OrcaSlicer, delete that file, and rerun "
+              "this script.)" % project_path)
+
+    if args.only:
+        print("Running only: %s" % ", ".join(letter for letter, _, _ in selected))
 
     log_path = newest_log(log_dir)
     if not log_path:
@@ -568,9 +577,7 @@ def main():
     for letter, state, fn in selected:
         if state != active_state:
             want_reload, want_slice = state
-            if state == (True, False) and full_run:
-                pass  # already covered by the fresh-project pause() above
-            elif state == (True, False):
+            if state == (True, False):
                 pause("Preferences: ENABLE  '%s'\n            DISABLE '%s'" % (PREF_RELOAD_LABEL, PREF_SLICE_LABEL))
             elif state == (True, True):
                 pause("Preferences: ENABLE '%s'.\nThen select the Prepare tab (not Preview)." % PREF_SLICE_LABEL)
@@ -586,21 +593,10 @@ def main():
     for name, _, detail in failed:
         print("  FAIL %s%s" % (name, (" -- " + detail) if detail else ""))
     if failed:
-        print("Test files left in %s; log at %s" % (work_dir, log_path))
+        print("Log at %s" % log_path)
         sys.exit(1)
-    if full_run:
-        os.remove(stl)
-        os.remove(stl_g_changed)
-        if os.path.exists(stl_g_missing):  # phase G deletes this one
-            os.remove(stl_g_missing)
-        os.remove(obj_path)
-        os.remove(flaky_stl)
-        os.remove(quick_stl)
-        try:
-            os.rmdir(work_dir)  # only if nothing else is in it
-        except OSError:
-            pass
-    print("All passed. Remember to restore the two preferences to the values you want.")
+    print("All passed. The project and generated files in %s are kept for the next run. "
+          "Remember to restore the two preferences to the values you want." % work_dir)
 
 
 if __name__ == "__main__":
