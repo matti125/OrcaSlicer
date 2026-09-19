@@ -469,10 +469,7 @@ def main():
     def phase_l():
         print("\n[L] Multi-plate: only the plate with the reloaded object should reslice")
         pause("Click \"Slice all\" now (if plate 1 and plate 2 aren't both already sliced) and "
-              "wait for both to finish. Then switch to viewing plate 1 (not plate 2, where "
-              "second_a.stl lives) before continuing -- L5 below checks that the view returns to "
-              "wherever it was, which only means something if you're not already on the plate "
-              "that's about to auto-slice.")
+              "wait for both to finish.")
         tail.mark(); time.sleep(1.5)
         write_cube_stl(stl_g_changed, 10)
         ok = tail.wait_for(RELOAD_MARK, args.timeout)
@@ -486,7 +483,9 @@ def main():
             record("L4 only plate 2 (with second_a.stl) resliced",
                    ask("  Check both plates' previews: did only plate 2's update, with plate 1's slice result "
                        "left untouched (not marked as needing a re-slice)?"))
-            record("L5 view returned to plate 1", ask("  Is the view back on plate 1 (not left on plate 2)?"))
+            record("L5 view left on plate 2",
+                   ask("  Is the view now showing plate 2 (the plate that was just auto-sliced), "
+                       "the same as it would after a manual \"Slice all\"?"))
 
     def phase_f():
         # Deliberately last among the reload-on phases: the pillar grid is slow to slice by design

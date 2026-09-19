@@ -120,11 +120,11 @@ skip the request. Each queued plate is selected, its slice result invalidated
 directly (`reload_from_disk()`'s own `update()` only *schedules* that invalidation
 via a debounce timer, which races a slice-enable check run right after it), and
 sliced; `on_process_completed()` steps to the next queued plate once each one
-finishes. Once the queue drains, the view returns to whichever plate was current
-before the sequence started, unless that's already the current plate — via
-`CallAfter`, since `on_process_completed()` still has its own preview refresh for the
-plate that just finished in flight at that point, which a synchronous plate switch
-right there would race and could lose to.
+finishes. Once the queue drains, the view is simply left on whichever plate was
+sliced last, matching how "Slice all" already behaves. It deliberately does not
+try to restore whatever plate was showing before the sequence started: a plate
+switch immediately after a slice completes races that plate's own in-flight
+preview refresh, and can leave stale toolpaths rendered over the wrong plate.
 
 The slice deliberately stays on whatever tab is active instead of jumping to Preview —
 this is a background action the user didn't just click, so rearranging what they're

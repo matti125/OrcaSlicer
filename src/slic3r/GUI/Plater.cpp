@@ -6749,10 +6749,9 @@ struct Plater::priv
     std::string m_broken_shown_sig;
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
-    // Plates still queued for the current auto-slice-after-reload sequence, and the plate to
-    // return to once it drains (-1 when no sequence is in flight). See maybe_auto_slice_after_reload().
+    // Plates still queued for the current auto-slice-after-reload sequence. See
+    // maybe_auto_slice_after_reload().
     std::vector<int> plates_pending_slice_after_reload;
-    int plate_to_restore_after_reload {-1};
     // Consumed once by on_action_slice_plate(), which otherwise unconditionally calls
     // select_view_3D("Preview") on every EVT_GLTOOLBAR_SLICE_PLATE regardless of who posted it --
     // a separate mechanism from m_tabpanel's page selection, and one MainFrame can't reach
@@ -10161,11 +10160,6 @@ void Plater::priv::maybe_auto_slice_after_reload(const std::set<int>& touched_ob
         return;
 
     plates_pending_slice_after_reload.assign(affected_plates.begin(), affected_plates.end());
-    if (plate_to_restore_after_reload < 0)
-        // Don't clobber this if a second reload lands while an earlier one is still slicing
-        // through its own queue -- the "current" plate at that moment may already be one this
-        // sequence jumped to, not the one the user was actually looking at.
-        plate_to_restore_after_reload = partplate_list.get_curr_plate_index();
 
     if (background_process.running() || m_is_slicing) {
         // A previous job is still in flight. Cancel it and start on the queued plates once the
@@ -12745,27 +12739,16 @@ bool Plater::priv::warnings_dialog()
 }
 
 //BBS: add project slice logic
-// Pops the next plate off plates_pending_slice_after_reload and slices it; once the queue drains,
-// returns the view to whichever plate was current before the sequence started (skipped if that's
-// already the current plate, the common single-plate case). Called directly by
+// Pops the next plate off plates_pending_slice_after_reload and slices it. Called directly by
 // maybe_auto_slice_after_reload() to kick the sequence off, and again from on_process_completed()
-// after each queued plate's slice completes, to step to the next one.
+// after each queued plate's slice completes, to step to the next one. Once the queue drains, the
+// view is simply left on whichever plate was sliced last -- the same thing "Slice all" already
+// does, and consistent with it, rather than trying to restore wherever the view was before the
+// sequence started.
 void Plater::priv::slice_after_reload()
 {
-    if (plates_pending_slice_after_reload.empty()) {
-        int restore_to = plate_to_restore_after_reload;
-        plate_to_restore_after_reload = -1;
-        if (restore_to >= 0 && restore_to != partplate_list.get_curr_plate_index()) {
-            // Deferred: this runs from on_process_completed(), which for the plate that just
-            // finished still has its own preview refresh (Preview::reload_print(), scheduled
-            // rather than applied here and now) in flight. Switching plates synchronously here
-            // raced it -- the just-finished plate's own refresh could land after this call and
-            // silently overwrite the restored view with its content instead. CallAfter runs once
-            // that settles.
-            wxTheApp->CallAfter([this, restore_to]() { q->select_plate(restore_to); });
-        }
+    if (plates_pending_slice_after_reload.empty())
         return;
-    }
 
     int plate_idx = plates_pending_slice_after_reload.front();
     plates_pending_slice_after_reload.erase(plates_pending_slice_after_reload.begin());
@@ -13000,11 +12983,8 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         auto_reslice_after_cancel = false;
         schedule_auto_reslice_if_needed();
     }
-    if (!plates_pending_slice_after_reload.empty() || plate_to_restore_after_reload >= 0) {
-        // Either another queued plate needs to start, or the queue just drained and the view
-        // still needs to return to where it was; slice_after_reload() handles both.
+    if (!plates_pending_slice_after_reload.empty())
         slice_after_reload();
-    }
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", exit.");
 }
