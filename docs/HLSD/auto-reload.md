@@ -126,9 +126,10 @@ try to restore whatever plate was showing before the sequence started: a plate
 switch immediately after a slice completes races that plate's own in-flight
 preview refresh, and can leave stale toolpaths rendered over the wrong plate.
 
-The slice deliberately stays on whatever tab is active instead of jumping to Preview —
-this is a background action the user didn't just click, so rearranging what they're
-looking at would be surprising.
+Each slice jumps to Preview once it starts, the same as a manually clicked "Slice" —
+opting into both `auto_reload_on_source_change` and `auto_slice_after_reload` makes
+the export itself the deliberate request to see a sliced result, no less than clicking
+"Slice" would be.
 
 ## Implementation and verification
 

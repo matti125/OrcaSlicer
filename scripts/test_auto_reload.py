@@ -369,7 +369,7 @@ def main():
             if started:
                 done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 3)
                 record("D3 slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 3))
-            record("D4 stayed on the current tab", ask("  Is the Prepare tab still selected (no jump to Preview)?"))
+            record("D4 jumped to Preview", ask("  Did the view switch to the Preview tab, the same as clicking \"Slice\" would?"))
 
     def phase_g():
         print("\n[G] Plate 2: one object's source changes, the other's vanishes")
@@ -488,8 +488,7 @@ def main():
                        "result untouched, plate 2 now show a fresh one, and plate 3 still show no "
                        "slice result at all?"))
             record("L5 view left on plate 2",
-                   ask("  Is the view now showing plate 2 (the plate that was just auto-sliced), "
-                       "the same as it would after a manual \"Slice all\"?"))
+                   ask("  Is the view now showing plate 2 (the plate that was just auto-sliced?"))
 
     def phase_f():
         # Deliberately last among the reload-on phases: the pillar grid is slow to slice by design
