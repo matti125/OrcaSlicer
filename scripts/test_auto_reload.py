@@ -529,17 +529,23 @@ def main():
             record("E2 model unchanged",
                    ask("  Is cube.stl still the ~94 x 94 mm pillar grid, %g mm tall (not a 35 mm cube)?" % h2))
 
-    # (letter, (want_reload, want_slice), fn), in the order they normally run.
+    # (letter, (want_reload, want_slice), fn), in the order they normally run. Grouped by
+    # preference state so the whole sequence needs only two toggles: G-K are pure reload checks
+    # (targeting, missing sources, retry, debounce) that never look at slicing at all, so they run
+    # with auto-slice off, same as A-C -- there's no reason to also track whether a slice fired,
+    # and which plate it landed on, while checking those. D, L and F specifically exercise the
+    # slice-after-reload behavior, so they're the only ones that need it on before E flips reload
+    # off entirely.
     PHASES = [
         ("A", (True, False), phase_a),
         ("B", (True, False), phase_b),
         ("C", (True, False), phase_c),
+        ("G", (True, False), phase_g),
+        ("H", (True, False), phase_h),
+        ("I", (True, False), phase_i),
+        ("J", (True, False), phase_j),
+        ("K", (True, False), phase_k),
         ("D", (True, True),  phase_d),
-        ("G", (True, True),  phase_g),
-        ("H", (True, True),  phase_h),
-        ("I", (True, True),  phase_i),
-        ("J", (True, True),  phase_j),
-        ("K", (True, True),  phase_k),
         ("L", (True, True),  phase_l),
         ("F", (True, True),  phase_f),
         ("E", (False, True), phase_e),
