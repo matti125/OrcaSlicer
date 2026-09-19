@@ -483,12 +483,14 @@ def main():
             if started:
                 done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 3)
                 record("L3 slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 3))
-            record("L4 only plate 2 (with second_a.stl) resliced",
+            # Asked before L5 touches any plate: answering it needs the view exactly as the
+            # auto-slice left it, which clicking around the other plates for L5 would disturb.
+            record("L4 view left on plate 2",
+                   ask("  Is the view now showing plate 2 (the plate that was just auto-sliced)?"))
+            record("L5 only plate 2 (with second_a.stl) resliced",
                    ask("  Check all three plates: does plate 1 still show its earlier manual slice "
                        "result untouched, plate 2 now show a fresh one, and plate 3 still show no "
                        "slice result at all?"))
-            record("L5 view left on plate 2",
-                   ask("  Is the view now showing plate 2 (the plate that was just auto-sliced?"))
 
     def phase_f():
         # Deliberately last among the reload-on phases: the pillar grid is slow to slice by design
