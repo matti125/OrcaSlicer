@@ -550,9 +550,11 @@ def main():
               "ask you to reopen it. The generated test files are all in: %s\n"
               "1. Start the OrcaSlicer build under test with a fresh, empty project.\n"
               "2. Import %s onto the first plate, alone.\n"
-              "3. Add a new plate. Import %s and %s onto it, together.\n"
-              "4. Add another new plate. Import %s, %s and %s onto it, then Auto Arrange that "
-              "plate so they don't overlap each other.\n"
+              "3. Add a new plate. Import %s and %s onto it as two separate objects (any order, "
+              "one at a time is fine), then Shift+A to Auto Arrange just that plate so they "
+              "don't overlap.\n"
+              "4. Add another new plate. Import %s, %s and %s onto it as three separate objects, "
+              "then Shift+A to Auto Arrange just that plate so they don't overlap.\n"
               "5. Save the project as: %s"
               % (work_dir, stl, stl_g_changed, stl_g_missing, obj_path, flaky_stl, quick_stl, project_path))
         while not os.path.exists(project_path):
