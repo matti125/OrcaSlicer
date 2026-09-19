@@ -52,9 +52,28 @@ def default_data_dir():
     return os.path.expanduser("~/.config/OrcaSlicer")
 
 
+_MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+           "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+_LOG_NAME_RE = re.compile(r"debug_\w{3}_(\w{3})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d+)\.log")
+
+
+def _log_launch_key(path):
+    """Sorts by the launch timestamp embedded in OrcaSlicer's own log filename
+    (debug_<Weekday>_<Month>_<DD>_<HH>_<MM>_<SS>_<PID>.log.0), not the file's mtime. If more
+    than one OrcaSlicer instance is running -- e.g. an old build left open in the background --
+    every one of them keeps its own log's mtime fresh via periodic autosave, so "newest mtime"
+    is close to a coin flip between them; the launch time in the name is unambiguous.
+    Falls back to mtime for a name that doesn't match (sorts before any recognized name)."""
+    m = _LOG_NAME_RE.match(os.path.basename(path))
+    if not m or m.group(1) not in _MONTHS:
+        return (0, os.path.getmtime(path))
+    month, day, hh, mm, ss, _pid = m.groups()
+    return (1, _MONTHS[month], int(day), int(hh), int(mm), int(ss))
+
+
 def newest_log(log_dir):
     logs = [p for p in glob.glob(os.path.join(log_dir, "debug_*.log*")) if not p.endswith(".enc")]
-    return max(logs, key=os.path.getmtime) if logs else None
+    return max(logs, key=_log_launch_key) if logs else None
 
 
 def read_prefs(data_dir):
