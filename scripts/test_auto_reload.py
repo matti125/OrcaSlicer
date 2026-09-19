@@ -16,7 +16,7 @@ the template the next time.
 Use --only to jump straight to one or more phases instead of running the whole sequence, e.g.
 --only L to re-check just the multi-plate fix -- this still just opens the same saved project,
 so nothing needs to have "already run" in this invocation for a phase to work. Run with --help
-for the full list of options (data dir, timeouts, pillar-grid height for the mid-slice test,
+for the full list of options (data dir, timeouts, block height for the mid-slice test,
 work dir for the generated model and saved project).
 
 Requires OrcaSlicer's log severity at the default "info" level (Preferences > Log level).
@@ -178,10 +178,14 @@ def write_cube_stl(path, size, atomic=False):
     write_stl(path, [(0, 0, 0, s, s, s)], atomic)
 
 
-def write_pillars_stl(path, height, n=16, pitch=6.0, width=4.0):
-    """An n x n grid of thin pillars: hundreds of islands per layer, so it slices slowly."""
-    boxes = [(i * pitch, j * pitch, 0, i * pitch + width, j * pitch + width, float(height))
-             for i in range(n) for j in range(n)]
+def write_buried_pillars_stl(path, height, n=64, pitch=1.5, width=1.0):
+    """A solid block with an n x n grid of pillars buried inside it. The slicer has to union
+    thousands of overlapping islands on every layer, so it slices slowly, yet the printed shape
+    is just the block: the G-code (and so the Preview) stays as light as a plain block's."""
+    size = n * pitch + 2
+    boxes = [(0, 0, 0, size, size, float(height))]
+    boxes += [(1 + i * pitch, 1 + j * pitch, 1, 1 + i * pitch + width, 1 + j * pitch + width, height - 1.0)
+              for i in range(n) for j in range(n)]
     write_stl(path, boxes)
 
 
@@ -268,7 +272,7 @@ def main():
     parser.add_argument("--quiet-window", type=float, default=8.0,
                         help="seconds to wait when asserting that nothing happens (default 8)")
     parser.add_argument("--slow-height", type=float, default=60.0,
-                        help="pillar height in mm for the mid-slice test; raise it if the slice finishes "
+                        help="block height in mm for the mid-slice test; raise it if the slice finishes "
                              "before the second change lands (default 60)")
     parser.add_argument("--mid-slice-delay", type=float, default=3.0,
                         help="seconds into the slow slice at which the second change is written (default 3)")
@@ -493,23 +497,23 @@ def main():
                        "slice result at all?"))
 
     def phase_f():
-        # Deliberately last among the reload-on phases: the pillar grid is slow to slice by design
+        # Deliberately last among the reload-on phases: the block with buried pillars is slow to slice by design
         # (that's the point, to give a real slice something to interrupt), which makes this the
         # slowest single phase in the whole script on a slow machine. Everything faster runs first.
         # cube.stl has plate 1 to itself (set up once, see main()'s setup instructions), so growing
-        # it into a large pillar grid here never overlaps anything else.
-        print("\n[F] Plate 1: change arriving mid-slice: cube -> %g mm pillar grid, then %g mm while that slices" % (h1, h2))
+        # it into a large block here never overlaps anything else.
+        print("\n[F] Plate 1: change arriving mid-slice: cube -> %g mm block with buried pillars, then %g mm while that slices" % (h1, h2))
         tail.mark(); time.sleep(1.5)
-        write_pillars_stl(stl, h1)
+        write_buried_pillars_stl(stl, h1)
         ok = tail.wait_for(RELOAD_MARK, args.timeout) and tail.wait_for(SLICE_START_MARK, args.timeout)
-        record("F1 reload and slice start for the pillar grid", ok)
+        record("F1 reload and slice start for the block", ok)
         if ok:
             time.sleep(args.mid_slice_delay)
             still_running = not tail.has_seen(SLICE_DONE_MARK)
             record("F2 first slice still running when the second change is written", still_running,
                    "" if still_running else "it already finished; raise --slow-height or lower --mid-slice-delay")
             tail.mark()
-            write_pillars_stl(stl, h2)
+            write_buried_pillars_stl(stl, h2)
             ok = tail.wait_for(RELOAD_MARK, args.timeout)
             record("F3 reload while slicing", ok, "" if ok else "no reload line within %gs" % args.timeout)
             if ok:
@@ -519,17 +523,17 @@ def main():
                 if restarted:
                     done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 6)
                     record("F5 restarted slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 6))
-                record("F6 final geometry is the second change", ask("  Are the pillars %g mm tall (not %g)?" % (h2, h1)))
+                record("F6 final geometry is the second change", ask("  Is the block %g mm tall (not %g)?" % (h2, h1)))
 
     def phase_e():
-        print("\n[E] Plate 1: in-place overwrite with auto-reload off (pillars -> 35 mm cube)")
+        print("\n[E] Plate 1: in-place overwrite with auto-reload off (block -> 35 mm cube)")
         tail.mark(); time.sleep(1.5)
         write_cube_stl(stl, 35)
         quiet = tail.absent_after(RELOAD_MARK, args.quiet_window)
         record("E1 no reload when '%s' is off" % PREF_RELOAD_LABEL, quiet, "" if quiet else "a reload happened anyway")
         if quiet:
             record("E2 model unchanged",
-                   ask("  Is cube.stl still the ~94 x 94 mm pillar grid, %g mm tall (not a 35 mm cube)?" % h2))
+                   ask("  Is cube.stl still the ~98 x 98 mm block, %g mm tall (not a 35 mm cube)?" % h2))
 
     # (letter, (want_reload, want_slice), fn), in the order they normally run. Grouped by
     # preference state so the whole sequence needs only two toggles: G-K are pure reload checks
