@@ -121,7 +121,10 @@ directly (`reload_from_disk()`'s own `update()` only *schedules* that invalidati
 via a debounce timer, which races a slice-enable check run right after it), and
 sliced; `on_process_completed()` steps to the next queued plate once each one
 finishes. Once the queue drains, the view returns to whichever plate was current
-before the sequence started, unless that's already the current plate.
+before the sequence started, unless that's already the current plate — via
+`CallAfter`, since `on_process_completed()` still has its own preview refresh for the
+plate that just finished in flight at that point, which a synchronous plate switch
+right there would race and could lose to.
 
 The slice deliberately stays on whatever tab is active instead of jumping to Preview —
 this is a background action the user didn't just click, so rearranging what they're

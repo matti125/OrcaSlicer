@@ -12753,9 +12753,17 @@ bool Plater::priv::warnings_dialog()
 void Plater::priv::slice_after_reload()
 {
     if (plates_pending_slice_after_reload.empty()) {
-        if (plate_to_restore_after_reload >= 0 && plate_to_restore_after_reload != partplate_list.get_curr_plate_index())
-            q->select_plate(plate_to_restore_after_reload);
+        int restore_to = plate_to_restore_after_reload;
         plate_to_restore_after_reload = -1;
+        if (restore_to >= 0 && restore_to != partplate_list.get_curr_plate_index()) {
+            // Deferred: this runs from on_process_completed(), which for the plate that just
+            // finished still has its own preview refresh (Preview::reload_print(), scheduled
+            // rather than applied here and now) in flight. Switching plates synchronously here
+            // raced it -- the just-finished plate's own refresh could land after this call and
+            // silently overwrite the restored view with its content instead. CallAfter runs once
+            // that settles.
+            wxTheApp->CallAfter([this, restore_to]() { q->select_plate(restore_to); });
+        }
         return;
     }
 
