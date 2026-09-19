@@ -468,8 +468,11 @@ def main():
 
     def phase_l():
         print("\n[L] Multi-plate: only the plate with the reloaded object should reslice")
-        pause("Click \"Slice all\" now (if plate 1 and plate 2 aren't both already sliced) and "
-              "wait for both to finish.")
+        pause("Switch to plate 1 and click \"Slice this plate\" now (if it isn't already sliced) "
+              "and wait for it to finish. Leave plates 2 and 3 unsliced -- slicing only plate 1 "
+              "first makes it easy to tell apart, afterwards, which plate the upcoming auto-slice "
+              "actually touched: plate 1 keeps this manual result untouched, plate 2 gets a fresh "
+              "one, and plate 3 should still show no slice result at all.")
         tail.mark(); time.sleep(1.5)
         write_cube_stl(stl_g_changed, 10)
         ok = tail.wait_for(RELOAD_MARK, args.timeout)
@@ -481,8 +484,9 @@ def main():
                 done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 3)
                 record("L3 slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 3))
             record("L4 only plate 2 (with second_a.stl) resliced",
-                   ask("  Check both plates' previews: did only plate 2's update, with plate 1's slice result "
-                       "left untouched (not marked as needing a re-slice)?"))
+                   ask("  Check all three plates: does plate 1 still show its earlier manual slice "
+                       "result untouched, plate 2 now show a fresh one, and plate 3 still show no "
+                       "slice result at all?"))
             record("L5 view left on plate 2",
                    ask("  Is the view now showing plate 2 (the plate that was just auto-sliced), "
                        "the same as it would after a manual \"Slice all\"?"))
