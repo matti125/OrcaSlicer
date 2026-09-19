@@ -12761,11 +12761,13 @@ void Plater::priv::slice_after_reload()
     // is_slice_result_valid() still reads stale "already sliced" and the slice is skipped.
     // Force this plate's slice result invalid directly instead of waiting on it.
     partplate_list.get_curr_plate()->update_slice_result_valid_state(false);
-    wxGetApp().mainframe->slice_current_plate(false);
-    // Same as on_action_slice_plate(): jump to Preview once the slice is under way. The user
-    // opted into both auto-reload and auto-slice, so the export that triggered this is exactly
-    // as deliberate a request to see the sliced result as clicking "Slice" themselves.
-    q->select_view_3D("Preview");
+    // switch_to_preview=true, same as a manually clicked "Slice": the user opted into both
+    // auto-reload and auto-slice, so the export that triggered this is exactly as deliberate a
+    // request to see the sliced result as clicking "Slice" themselves. This is also what keeps
+    // the tab bar in sync with the view -- it's what drives m_tabpanel->SelectPageByName() in
+    // MainFrame::slice_current_plate(); calling select_view_3D() here directly instead would
+    // switch the 3D view's content to Preview while leaving the tab bar reading "Prepare".
+    wxGetApp().mainframe->slice_current_plate(true);
 }
 
 void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
