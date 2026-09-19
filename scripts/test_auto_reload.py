@@ -467,6 +467,12 @@ def main():
     # slowest single phase in the whole script on a slow machine. Everything faster runs first.
     h1, h2 = args.slow_height, args.slow_height / 2
     print("\n[F] Change arriving mid-slice: cube -> %g mm pillar grid, then %g mm while that slices" % (h1, h2))
+    pause("This phase grows %s into a ~94 x 94 mm pillar grid (write_pillars_stl()'s default "
+          "footprint, independent of height), which will overlap the objects phases G-L added if "
+          "they're all still sharing its plate. Move %s's object to its own NEW, empty plate now "
+          "(drag it onto \"+\" in the plate list, or right-click > Move to new plate), then switch "
+          "to that plate."
+          % (os.path.basename(stl), os.path.basename(stl)))
     tail.mark(); time.sleep(1.5)
     write_pillars_stl(stl, h1)
     ok = tail.wait_for(RELOAD_MARK, args.timeout) and tail.wait_for(SLICE_START_MARK, args.timeout)
