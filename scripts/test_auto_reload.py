@@ -150,13 +150,17 @@ BOX_FACES = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
              (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
 
 
-def write_stl(path, boxes, atomic=False):
-    """Writes an ASCII STL of axis-aligned boxes given as (x0, y0, z0, x1, y1, z1)."""
+def write_stl(path, boxes, atomic=False, voids=()):
+    """Writes an ASCII STL of axis-aligned boxes given as (x0, y0, z0, x1, y1, z1). Boxes in
+    `voids` are wound inward, so the slicer treats them as enclosed cavities, not solids."""
     lines = ["solid test"]
-    for x0, y0, z0, x1, y1, z1 in boxes:
+    for x0, y0, z0, x1, y1, z1 in list(boxes) + list(voids):
+        inward = (x0, y0, z0, x1, y1, z1) in voids
         v = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
              (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
         for a, b, c in BOX_FACES:
+            if inward:
+                b, c = c, b
             lines.append("  facet normal 0 0 0\n    outer loop")
             for i in (a, b, c):
                 lines.append("      vertex %g %g %g" % v[i])
@@ -178,15 +182,14 @@ def write_cube_stl(path, size, atomic=False):
     write_stl(path, [(0, 0, 0, s, s, s)], atomic)
 
 
-def write_buried_pillars_stl(path, height, n=64, pitch=1.5, width=1.0):
-    """A solid block with an n x n grid of pillars buried inside it. The slicer has to union
-    thousands of overlapping islands on every layer, so it slices slowly, yet the printed shape
-    is just the block: the G-code (and so the Preview) stays as light as a plain block's."""
+def write_buried_pillars_stl(path, height, n=32, pitch=1.5, width=1.0, with_voids=True):
+    """A solid block with an n x n grid of sealed cavities (wound inward) buried inside it. The
+    slicer has to carry thousands of holes through every layer, so it slices slowly. With
+    with_voids=False it is the same block, footprint included, but plain."""
     size = n * pitch + 2
-    boxes = [(0, 0, 0, size, size, float(height))]
-    boxes += [(1 + i * pitch, 1 + j * pitch, 1, 1 + i * pitch + width, 1 + j * pitch + width, height - 1.0)
-              for i in range(n) for j in range(n)]
-    write_stl(path, boxes)
+    voids = [(1 + i * pitch, 1 + j * pitch, 1, 1 + i * pitch + width, 1 + j * pitch + width, height - 1.0)
+             for i in range(n) for j in range(n)] if with_voids else []
+    write_stl(path, [(0, 0, 0, size, size, float(height))], voids=voids)
 
 
 def write_obj_cube(path, size):
@@ -497,12 +500,12 @@ def main():
                        "slice result at all?"))
 
     def phase_f():
-        # Deliberately last among the reload-on phases: the block with buried pillars is slow to slice by design
+        # Deliberately last among the reload-on phases: the block with buried voids is slow to slice by design
         # (that's the point, to give a real slice something to interrupt), which makes this the
         # slowest single phase in the whole script on a slow machine. Everything faster runs first.
         # cube.stl has plate 1 to itself (set up once, see main()'s setup instructions), so growing
         # it into a large block here never overlaps anything else.
-        print("\n[F] Plate 1: change arriving mid-slice: cube -> %g mm block with buried pillars, then %g mm while that slices" % (h1, h2))
+        print("\n[F] Plate 1: change arriving mid-slice: cube -> %g mm block with buried voids, then a plain %g mm block while that slices" % (h1, h2))
         tail.mark(); time.sleep(1.5)
         write_buried_pillars_stl(stl, h1)
         ok = tail.wait_for(RELOAD_MARK, args.timeout) and tail.wait_for(SLICE_START_MARK, args.timeout)
@@ -513,7 +516,7 @@ def main():
             record("F2 first slice still running when the second change is written", still_running,
                    "" if still_running else "it already finished; raise --slow-height or lower --mid-slice-delay")
             tail.mark()
-            write_buried_pillars_stl(stl, h2)
+            write_buried_pillars_stl(stl, h2, with_voids=False)
             ok = tail.wait_for(RELOAD_MARK, args.timeout)
             record("F3 reload while slicing", ok, "" if ok else "no reload line within %gs" % args.timeout)
             if ok:
@@ -523,7 +526,7 @@ def main():
                 if restarted:
                     done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 6)
                     record("F5 restarted slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 6))
-                record("F6 final geometry is the second change", ask("  Is the block %g mm tall (not %g)?" % (h2, h1)))
+                record("F6 final geometry is the second change", ask("  Is the block %g mm tall (not %g) and solid, with no voids?" % (h2, h1)))
 
     def phase_e():
         print("\n[E] Plate 1: in-place overwrite with auto-reload off (block -> 35 mm cube)")
@@ -533,7 +536,7 @@ def main():
         record("E1 no reload when '%s' is off" % PREF_RELOAD_LABEL, quiet, "" if quiet else "a reload happened anyway")
         if quiet:
             record("E2 model unchanged",
-                   ask("  Is cube.stl still the ~98 x 98 mm block, %g mm tall (not a 35 mm cube)?" % h2))
+                   ask("  Is cube.stl still the ~50 x 50 mm block, %g mm tall (not a 35 mm cube)?" % h2))
 
     # (letter, (want_reload, want_slice), fn), in the order they normally run. Grouped by
     # preference state so the whole sequence needs only two toggles: G-K are pure reload checks
