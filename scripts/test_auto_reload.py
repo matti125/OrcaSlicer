@@ -547,16 +547,14 @@ def main():
     if first_time:
         pause("One-time setup -- OrcaSlicer will remember this as a project file, so this only\n"
               "needs to happen once; every future run of this script (today or later) will just\n"
-              "ask you to reopen it.\n"
+              "ask you to reopen it. The generated test files are all in: %s\n"
               "1. Start the OrcaSlicer build under test with a fresh, empty project.\n"
               "2. Import %s onto the first plate, alone.\n"
               "3. Add a new plate. Import %s and %s onto it, together.\n"
               "4. Add another new plate. Import %s, %s and %s onto it, then Auto Arrange that "
               "plate so they don't overlap each other.\n"
               "5. Save the project as: %s"
-              % (os.path.basename(stl), os.path.basename(stl_g_changed), os.path.basename(stl_g_missing),
-                 os.path.basename(obj_path), os.path.basename(flaky_stl), os.path.basename(quick_stl),
-                 project_path))
+              % (work_dir, stl, stl_g_changed, stl_g_missing, obj_path, flaky_stl, quick_stl, project_path))
         while not os.path.exists(project_path):
             input("  Don't see %s yet -- save the project there, then press Enter to re-check... " % project_path)
     else:
