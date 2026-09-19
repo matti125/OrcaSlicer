@@ -347,30 +347,6 @@ def main():
             record("D3 slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 3))
         record("D4 stayed on the current tab", ask("  Is the Prepare tab still selected (no jump to Preview)?"))
 
-    h1, h2 = args.slow_height, args.slow_height / 2
-    print("\n[F] Change arriving mid-slice: cube -> %g mm pillar grid, then %g mm while that slices" % (h1, h2))
-    tail.mark(); time.sleep(1.5)
-    write_pillars_stl(stl, h1)
-    ok = tail.wait_for(RELOAD_MARK, args.timeout) and tail.wait_for(SLICE_START_MARK, args.timeout)
-    record("F1 reload and slice start for the pillar grid", ok)
-    if ok:
-        time.sleep(args.mid_slice_delay)
-        still_running = not tail.has_seen(SLICE_DONE_MARK)
-        record("F2 first slice still running when the second change is written", still_running,
-               "" if still_running else "it already finished; raise --slow-height or lower --mid-slice-delay")
-        tail.mark()
-        write_pillars_stl(stl, h2)
-        ok = tail.wait_for(RELOAD_MARK, args.timeout)
-        record("F3 reload while slicing", ok, "" if ok else "no reload line within %gs" % args.timeout)
-        if ok:
-            restarted = tail.wait_for(SLICE_START_MARK, args.timeout)
-            record("F4 slice restarted after the reload", restarted,
-                   "" if restarted else "no second slice-start line within %gs" % args.timeout)
-            if restarted:
-                done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 6)
-                record("F5 restarted slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 6))
-            record("F6 final geometry is the second change", ask("  Are the pillars %g mm tall (not %g)?" % (h2, h1)))
-
     print("\n[G] Two more objects: one's source changes, the other's vanishes")
     pause("Import both %s and %s as two NEW, separate objects (in addition to the existing one), "
           "then Auto Arrange so they don't overlap it or each other."
@@ -485,6 +461,33 @@ def main():
         record("L5 view returned to where it was before this check",
                ask("  Is the plate view back on whatever plate was showing before this check (not left on "
                    "plate 2, unless that's where you started)?"))
+
+    # Deliberately last among the reload-on phases: the pillar grid is slow to slice by design
+    # (that's the point, to give a real slice something to interrupt), which makes this the
+    # slowest single phase in the whole script on a slow machine. Everything faster runs first.
+    h1, h2 = args.slow_height, args.slow_height / 2
+    print("\n[F] Change arriving mid-slice: cube -> %g mm pillar grid, then %g mm while that slices" % (h1, h2))
+    tail.mark(); time.sleep(1.5)
+    write_pillars_stl(stl, h1)
+    ok = tail.wait_for(RELOAD_MARK, args.timeout) and tail.wait_for(SLICE_START_MARK, args.timeout)
+    record("F1 reload and slice start for the pillar grid", ok)
+    if ok:
+        time.sleep(args.mid_slice_delay)
+        still_running = not tail.has_seen(SLICE_DONE_MARK)
+        record("F2 first slice still running when the second change is written", still_running,
+               "" if still_running else "it already finished; raise --slow-height or lower --mid-slice-delay")
+        tail.mark()
+        write_pillars_stl(stl, h2)
+        ok = tail.wait_for(RELOAD_MARK, args.timeout)
+        record("F3 reload while slicing", ok, "" if ok else "no reload line within %gs" % args.timeout)
+        if ok:
+            restarted = tail.wait_for(SLICE_START_MARK, args.timeout)
+            record("F4 slice restarted after the reload", restarted,
+                   "" if restarted else "no second slice-start line within %gs" % args.timeout)
+            if restarted:
+                done = tail.wait_for(SLICE_DONE_MARK, args.timeout * 6)
+                record("F5 restarted slice completed", done, "" if done else "no completion line within %gs" % (args.timeout * 6))
+            record("F6 final geometry is the second change", ask("  Are the pillars %g mm tall (not %g)?" % (h2, h1)))
 
     # --- reload off -----------------------------------------------------------------------
     pause("Preferences: DISABLE '%s' (leave the slice option as it is)." % PREF_RELOAD_LABEL)
