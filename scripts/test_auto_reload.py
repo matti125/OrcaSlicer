@@ -4,10 +4,12 @@
 Drives the on-disk side of the feature (in-place overwrite, rename-into-place) against a
 running OrcaSlicer and checks the outcome in OrcaSlicer's own log. The GUI steps that can't
 be scripted are kept to a one-time setup: the first run asks you to import the generated test
-objects onto three plates and save that as a project file; every run after that (including a
-future one on a different day) just asks you to open the saved project, then drives every phase
-by itself -- the only GUI work left per phase is answering a handful of "does this look right"
-questions.
+objects onto three plates and save that as a read-only template project; every run after that
+(including a future one on a different day) opens a fresh working copy cloned from that
+template and drives every phase by itself -- the only GUI work left per phase is answering a
+handful of "does this look right" questions. The working copy is disposable: whatever happens
+to it in OrcaSlicer during a run, including an accidental save, is discarded and re-cloned from
+the template the next time.
 
     python3 scripts/test_auto_reload.py [options]
 
@@ -26,6 +28,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import sys
 import threading
 import time
@@ -283,8 +286,14 @@ def main():
 
     work_dir = os.path.abspath(args.work_dir)
     os.makedirs(work_dir, exist_ok=True)
+    # template_path is the one-time-setup result, made read-only so an accidental Cmd+S in
+    # OrcaSlicer can't silently corrupt the baseline every future run reopens. project_path is a
+    # disposable working copy, re-cloned from the template at the start of every run -- whatever
+    # a previous run left it as (resliced, resized, saved over or not) doesn't matter, since it's
+    # about to be overwritten anyway.
+    template_path = os.path.join(work_dir, "autoreload_test_template.3mf")
     project_path = os.path.join(work_dir, "autoreload_test.3mf")
-    first_time = not os.path.exists(project_path)
+    first_time = not os.path.exists(template_path)
 
     stl           = os.path.join(work_dir, "cube.stl")        # plate 1, alone
     stl_g_changed = os.path.join(work_dir, "second_a.stl")    # plate 2, with stl_g_missing
@@ -556,13 +565,22 @@ def main():
               "4. Add another new plate. Import %s, %s and %s onto it as three separate objects, "
               "then Shift+A to Auto Arrange just that plate so they don't overlap.\n"
               "5. Save the project as: %s"
-              % (work_dir, stl, stl_g_changed, stl_g_missing, obj_path, flaky_stl, quick_stl, project_path))
-        while not os.path.exists(project_path):
-            input("  Don't see %s yet -- save the project there, then press Enter to re-check... " % project_path)
+              % (work_dir, stl, stl_g_changed, stl_g_missing, obj_path, flaky_stl, quick_stl, template_path))
+        while not os.path.exists(template_path):
+            input("  Don't see %s yet -- save the project there, then press Enter to re-check... " % template_path)
+        os.chmod(template_path, 0o444)  # read-only: an accidental Cmd+S in OrcaSlicer can't corrupt it
+
+    # Every run opens a fresh working copy, never the template itself, so nothing that happens
+    # to it in OrcaSlicer -- including saving over it -- affects the next run.
+    shutil.copy2(template_path, project_path)
+    os.chmod(project_path, 0o644)  # copy2() also copies the template's read-only bit; undo that
+    if first_time:
+        pause("Open the test project: %s" % project_path)
     else:
-        pause("Open the saved test project: %s\n"
-              "(To redo the one-time setup instead, quit OrcaSlicer, delete that file, and rerun "
-              "this script.)" % project_path)
+        pause("Open the test project: %s\n"
+              "(To redo the one-time setup instead: delete %s -- it's read-only, so on Windows "
+              "you may need to clear that attribute first -- then rerun this script.)"
+              % (project_path, template_path))
 
     if args.only:
         print("Running only: %s" % ", ".join(letter for letter, _, _ in selected))
